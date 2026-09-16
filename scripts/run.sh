@@ -9,18 +9,29 @@
 # First run clones the source and copies .env.example to .env; fill in
 # BOT_TOKEN / GROUP_ID / ADMIN_IDS there, then run the same line again to
 # start the relay on port 17575.
+#
+# When run from inside a relay-tg checkout (e.g. for local development),
+# the script uses that checkout directly instead of cloning.
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
 URL=https://github.com/pikapeek/relay-tg.git
 DIR=relay-tg
 
-if [ ! -d "$DIR" ]; then
-  echo "==> cloning relay-tg"
-  git clone "$URL" "$DIR"
+# If this script lives inside a relay-tg checkout, use it directly.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd || true)"
+LOCAL_ROOT="$(cd "$SCRIPT_DIR/.." >/dev/null 2>&1 && pwd || true)"
+if [ -n "$LOCAL_ROOT" ] && [ -f "$LOCAL_ROOT/pnpm-workspace.yaml" ] && [ -f "$LOCAL_ROOT/package.json" ]; then
+  echo "==> using local relay-tg checkout at $LOCAL_ROOT"
+  cd "$LOCAL_ROOT"
+else
+  if [ ! -d "$DIR" ]; then
+    echo "==> cloning relay-tg"
+    git clone "$URL" "$DIR"
+  fi
+  cd "$DIR"
+  git pull --quiet
 fi
-cd "$DIR"
-git pull --quiet
 
 if command -v pnpm >/dev/null 2>&1; then
   PNPM=pnpm
