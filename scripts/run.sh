@@ -22,13 +22,20 @@ fi
 cd "$DIR"
 git pull --quiet
 
-if ! command -v pnpm >/dev/null 2>&1; then
+if command -v pnpm >/dev/null 2>&1; then
+  PNPM=pnpm
+elif command -v corepack >/dev/null 2>&1; then
+  # Node >= 16.13 ships corepack; it runs the exact pnpm version pinned
+  # in package.json without needing a global install.
+  PNPM="corepack pnpm"
+else
   echo "==> installing pnpm"
   npm install -g pnpm
+  PNPM=pnpm
 fi
 
 echo "==> installing dependencies"
-pnpm install
+$PNPM install
 
 if [ ! -f .env ]; then
   cp .env.example .env
@@ -40,4 +47,4 @@ fi
 
 set -a; source .env; set +a
 echo "==> starting relaytg"
-exec pnpm start
+exec $PNPM start
