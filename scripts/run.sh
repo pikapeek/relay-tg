@@ -47,4 +47,7 @@ fi
 
 set -a; source .env; set +a
 echo "==> starting relaytg"
-exec $PNPM start
+# Use --filter so we don't re-invoke pnpm inside the start script
+# (root's `pnpm start` delegates to pnpm, which breaks when pnpm is
+# reached via corepack and isn't on PATH).
+exec $PNPM --filter @relaytg/app-docker start
