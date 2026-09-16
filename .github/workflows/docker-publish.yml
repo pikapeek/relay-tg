@@ -4,9 +4,6 @@ name: Publish Docker image
 # (ghcr.io/<owner>/relay-tg) so users can `docker run` / `docker compose`
 # without building locally.
 on:
-  push:
-    branches: [main]
-    tags: ["v*"]
   workflow_dispatch:
 
 permissions:

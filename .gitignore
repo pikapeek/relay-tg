@@ -49,9 +49,9 @@ data/
 *.log
 .pnpm-debug.log*
 
-# Crash dumps
-core
-core.*
+# Crash dumps (repo root only — not the src/packages/core package)
+/core
+/core.*
 
 # OS / editor
 .DS_Store
