@@ -10,13 +10,36 @@ import { createApp, createHttpServer, HIDE_SWEEP_INTERVAL_MS } from "./app.ts";
 export { createApp, createHttpServer, handleWebhookJson } from "./app.ts";
 export type { AppDeps, RelayApp } from "./app.ts";
 
-const IS_ENTRYPOINT = process.argv[1] && import.meta.url.endsWith(process.argv[1]);
+// True when this module is run as the program: under `tsx src/index.ts`
+// argv[1] is the script (ESM source), and in the SEA binary argv[1] is the
+// executable itself. Avoids `import.meta.url`, which esbuild can't shim when
+// bundling to the CJS format the Node-22 SEA requires.
+const IS_ENTRYPOINT =
+  process.argv[1] !== undefined &&
+  (process.argv[1] === process.execPath || process.argv[1].endsWith("index.ts"));
 
 if (IS_ENTRYPOINT) {
   void main();
 }
 
 async function main(): Promise<void> {
+  // Self-contained binary: load a `.env` beside it if present. loadEnvFile
+  // only fills vars that aren't already set, so Docker env_file / run.sh
+  // sourcing still win; a missing file just means env comes from outside.
+  try {
+    process.loadEnvFile();
+  } catch {
+    // no .env in cwd — rely on injected env
+  }
+  try {
+    await start();
+  } catch (err) {
+    console.error(`relaytg: failed to start: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+}
+
+async function start(): Promise<void> {
   const app = await createApp({ env: process.env });
   const logger = app.logger;
 

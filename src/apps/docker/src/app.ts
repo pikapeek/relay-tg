@@ -7,13 +7,12 @@
 // ---------------------------------------------------------------------------
 
 import { mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dirname } from "node:path";
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
 import { ConsoleLogger, loadConfig, type Config, type EnvSource, type Logger } from "@relaytg/shared";
 import type { ProcessResult } from "@relaytg/shared";
 import { HttpTelegramClient, parseUpdate } from "@relaytg/telegram";
-import { NodeSqliteDb, SqliteDatabase, applyMigrations, loadMigrationsFromDir } from "@relaytg/adapter-sqlite";
+import { NodeSqliteDb, SqliteDatabase, applyMigrations, loadMigrationsFromDir, MIGRATIONS } from "@relaytg/adapter-sqlite";
 import {
   InMemoryVerificationStore,
   KeyedMutexSerializer,
@@ -24,10 +23,6 @@ import {
   type CoreServices,
 } from "@relaytg/core";
 import type { Database, Runtime, Serializer, TelegramClient, VerificationStore } from "@relaytg/core";
-
-/** Repo migrations directory, resolved relative to this source file so the
- *  path holds both in the working tree and inside the Docker image. */
-const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "migrations");
 
 /** Hourly hide sweep cadence (task 11.3). */
 export const HIDE_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
@@ -82,7 +77,10 @@ export async function createApp(deps: AppDeps): Promise<RelayApp> {
   mkdirSync(dirname(dbPath), { recursive: true });
   const sql = NodeSqliteDb.open(dbPath);
   if (deps.migrateOnBoot !== false) {
-    const applied = await applyMigrations(sql, loadMigrationsFromDir(deps.migrations ?? migrationsDir));
+    // Embedded by default (single source of truth in @relaytg/adapter-sqlite,
+    // guarded by the drift test); the dir override is kept for tests.
+    const migrations = deps.migrations ? loadMigrationsFromDir(deps.migrations) : MIGRATIONS;
+    const applied = await applyMigrations(sql, migrations);
     if (applied.length > 0) logger.info("system_start", { status: `migrations:${applied.join(",")}` });
   }
   const db = new SqliteDatabase(sql);

@@ -8,6 +8,7 @@
     "./sql-db": "./src/sql-db.ts",
     "./repository": "./src/repository.ts",
     "./migrate": "./src/migrate.ts",
+    "./migrations": "./src/migrations.ts",
     "./relay-suite": "./src/relay-suite.ts"
   },
   "scripts": {

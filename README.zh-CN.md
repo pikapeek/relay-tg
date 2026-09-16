@@ -42,13 +42,13 @@
 
 ### 2️⃣ 选择运行方式
 
-**💻 命令行** — 一键脚本：
+**💻 命令行** — 一键脚本，一行完成安装、配置、启动：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/pikapeek/relay-tg/main/scripts/run.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/pikapeek/relay-tg/main/scripts/run.sh) --token=1234567890:REPLACE_WITH_REAL_TOKEN --group=-1001234567890 --admin=111,222
 ```
 
-第一次运行自动 clone 源码并复制 `.env.example` → `.env`；填好 `BOT_TOKEN` / `GROUP_ID` / `ADMIN_IDS` 后再跑一次同一行，就会加载 `.env` 并在 17575 端口启动。
+参数都可省略——缺 `--token` / `--group` 时脚本会交互式逐项询问（BOT_TOKEN 不回显），其余用默认值。脚本会先检查环境：没有 Node（或低于 22.5）时征求你的同意，把官方 Node 22 装到 `~/.relaytg`（不动系统其他部分），然后自动 clone 源码、写 `.env`、装依赖并在 17575 端口启动；之后不带参数再跑同一行，就用已有 `.env` 直接启动。可用参数：`--token` / `--group` / `--admin` / `--operator` / `--port` / `--db` / `--auto-hide`。
 
 **🐳 Docker** — `docker-compose.yml`：
 

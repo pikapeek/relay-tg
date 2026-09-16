@@ -40,13 +40,13 @@ Each user gets their own topic in a forum group — operators reply inside the t
 
 ### 2️⃣ Pick a runtime
 
-**💻 Command line** — one-command script:
+**💻 Command line** — one-command script: install, configure and start in a single line:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/pikapeek/relay-tg/main/scripts/run.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/pikapeek/relay-tg/main/scripts/run.sh) --token=1234567890:REPLACE_WITH_REAL_TOKEN --group=-1001234567890 --admin=111,222
 ```
 
-First run clones the source and copies `.env.example` → `.env`; fill in `BOT_TOKEN` / `GROUP_ID` / `ADMIN_IDS`, then run the same line again to start on port 17575.
+Every option is optional — leave out `--token` / `--group` and the script asks for them interactively (BOT_TOKEN is not echoed). The script checks the environment first: if Node is missing or below 22.5, it asks for your consent and installs an official Node 22 into `~/.relaytg` (no system changes). Then it clones the source, writes `.env`, installs dependencies and starts on port 17575 — no manual editing. Re-run the same line without options to start again from the existing `.env`. Options: `--token` / `--group` / `--admin` / `--operator` / `--port` / `--db` / `--auto-hide`.
 
 **🐳 Docker** — `docker-compose.yml`:
 
