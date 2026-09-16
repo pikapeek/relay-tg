@@ -1,0 +1,29 @@
+# ---------------------------------------------------------------------------
+# RelayTG Docker runtime. `docker compose -f src/docker/docker-compose.yml up -d`
+# (from the repo root, or `cd src/docker && docker compose up -d`) starts the
+# relay; the SQLite database persists on the mounted ../../data volume, so
+# container restarts keep all users, conversations, topics and messages.
+#
+# Configuration comes from the repo-root `.env` (see .env.example); the compose
+# file lives two levels down, so paths below are relative to src/docker/ and
+# reach back up with `../../`. BOT_TOKEN is read from the environment at startup
+# and never lands in the image or the database.
+# ---------------------------------------------------------------------------
+
+services:
+  relaytg:
+    build:
+      context: ../..
+      dockerfile: src/docker/Dockerfile
+    image: relaytg:latest
+    container_name: relaytg
+    restart: unless-stopped
+    env_file:
+      - ../../.env
+    environment:
+      DATABASE_PATH: /app/data/relaytg.db
+      PORT: "17575"
+    ports:
+      - "17575:17575"
+    volumes:
+      - ../../data:/app/data

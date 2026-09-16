@@ -1,0 +1,28 @@
+{
+  "name": "relaytg",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.3.4",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "pnpm -r build",
+    "dev": "pnpm --filter @relaytg/app-docker dev",
+    "start": "pnpm --filter @relaytg/app-docker start",
+    "dev:cf": "pnpm --filter @relaytg/app-worker dev",
+    "deploy:cf": "bash src/scripts/deploy-cf.sh"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250901.0",
+    "@types/node": "^22.5.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^3.0.0",
+    "wrangler": "^3.80.0"
+  }
+}

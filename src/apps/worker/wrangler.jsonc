@@ -1,0 +1,43 @@
+{
+  // RelayTG Cloudflare runtime (tasks 12.1–12.3).
+  //
+  // Secrets must NEVER live in this file. Set them as Worker secrets:
+  //   npx wrangler secret put BOT_TOKEN
+  //   npx wrangler secret put ADMIN_IDS
+  //   npx wrangler secret put OPERATOR_IDS
+  // Vars here are non-secret telemetry-free defaults; GROUP_ID is
+  // usually fine as a var too (a group id is not a credential).
+  "name": "relaytg",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-08-01",
+  "vars": {
+    "GROUP_ID": "",
+    "AUTO_HIDE_HOURS": "168",
+    "VERIFY_ATTEMPTS": "3",
+    "VERIFY_TTL_SECONDS": "300",
+    "SPAM_ENABLED": "true",
+    "SPAM_RATE_LIMIT_MAX": "10",
+    "SPAM_RATE_LIMIT_WINDOW_SECONDS": "60",
+    "SPAM_FLOOD_MAX": "30",
+    "SPAM_FLOOD_WINDOW_SECONDS": "60",
+    "SPAM_FLOOD_RESTRICT_SECONDS": "300",
+    "SPAM_MAX_MESSAGE_LENGTH": "4096",
+    "SPAM_MAX_MEDIA_SIZE_BYTES": "20971520",
+    "TELEGRAM_RETRIES": "3",
+    "TELEGRAM_BASE_BACKOFF_MS": "500"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CONVERSATION",
+        "class_name": "ConversationDO"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["ConversationDO"]
+    }
+  ]
+}

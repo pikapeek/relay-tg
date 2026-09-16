@@ -1,0 +1,39 @@
+{
+  // Root-level config so Cloudflare's one-click "Deploy to Workers" button works
+  // (the button looks for wrangler.jsonc at the repo root). The canonical CLI
+  // workflow stays src/apps/worker/wrangler.jsonc, used by `pnpm dev:cf` /
+  // `pnpm deploy:cf`. Keep both files in sync.
+  "name": "relaytg",
+  "main": "src/apps/worker/src/index.ts",
+  "compatibility_date": "2025-08-01",
+  "vars": {
+    "GROUP_ID": "",
+    "AUTO_HIDE_HOURS": "168",
+    "VERIFY_ATTEMPTS": "3",
+    "VERIFY_TTL_SECONDS": "300",
+    "SPAM_ENABLED": "true",
+    "SPAM_RATE_LIMIT_MAX": "10",
+    "SPAM_RATE_LIMIT_WINDOW_SECONDS": "60",
+    "SPAM_FLOOD_MAX": "30",
+    "SPAM_FLOOD_WINDOW_SECONDS": "60",
+    "SPAM_FLOOD_RESTRICT_SECONDS": "300",
+    "SPAM_MAX_MESSAGE_LENGTH": "4096",
+    "SPAM_MAX_MEDIA_SIZE_BYTES": "20971520",
+    "TELEGRAM_RETRIES": "3",
+    "TELEGRAM_BASE_BACKOFF_MS": "500"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CONVERSATION",
+        "class_name": "ConversationDO"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["ConversationDO"]
+    }
+  ]
+}

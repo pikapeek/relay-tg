@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"]
+  },
+  "include": [
+    "vitest.config.ts",
+    "src/packages/**/*.ts",
+    "src/adapters/sqlite/**/*.ts",
+    "src/apps/docker/**/*.ts"
+  ]
+}

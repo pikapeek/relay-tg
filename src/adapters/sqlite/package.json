@@ -1,0 +1,24 @@
+{
+  "name": "@relaytg/adapter-sqlite",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./sql-db": "./src/sql-db.ts",
+    "./repository": "./src/repository.ts",
+    "./migrate": "./src/migrate.ts",
+    "./relay-suite": "./src/relay-suite.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@relaytg/core": "workspace:*",
+    "@relaytg/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.0",
+    "typescript": "^5.6.0"
+  }
+}

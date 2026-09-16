@@ -1,0 +1,21 @@
+{
+  "name": "@relaytg/adapter-cloudflare-do",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@relaytg/adapter-sqlite": "workspace:*",
+    "@relaytg/core": "workspace:*",
+    "@relaytg/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250901.0",
+    "typescript": "^5.6.0"
+  }
+}

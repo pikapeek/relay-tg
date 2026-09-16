@@ -1,0 +1,45 @@
+# Secrets & local config — never into an image
+.env
+.env.*
+!.env.example
+
+# AI / 本地协作产物
+.claude/
+.claude-code/
+openspec/
+AGENTS.md
+.cursor/
+.windsurf/
+.aider*
+.continue/
+.codeium/
+.gemini/
+
+# Runtime data & local state
+data/
+*.db
+*.db-journal
+.DS_Store
+Thumbs.db
+
+# Tooling / vcs
+.git
+.gitignore
+.github/copilot-instructions.md
+
+# Dependencies & build output (reinstalled inside the image)
+node_modules/
+.pnpm-store/
+dist/
+build/
+out/
+*.tsbuildinfo
+*.js.map
+.turbo/
+.wrangler/
+.dev.vars
+
+# Tests / coverage / logs
+coverage/
+*.log
+.pnpm-debug.log*
