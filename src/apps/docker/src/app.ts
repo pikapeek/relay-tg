@@ -6,8 +6,9 @@
 // tests swap in the fake and the whole graph stays real.
 // ---------------------------------------------------------------------------
 
-import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { existsSync, mkdirSync } from "node:fs";
+import { dirname, isAbsolute, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
 import { ConsoleLogger, loadConfig, type Config, type EnvSource, type Logger } from "@relaytg/shared";
 import type { ProcessResult } from "@relaytg/shared";
@@ -17,15 +18,50 @@ import {
   InMemoryVerificationStore,
   KeyedMutexSerializer,
   WallClockRuntime,
-  buildServices,
-  setCommandMenu,
-  syncPreferredLanguageMenus,
+  bootServices,
   type CoreServices,
 } from "@relaytg/core";
 import type { Database, Runtime, Serializer, TelegramClient, VerificationStore } from "@relaytg/core";
 
 /** Hourly hide sweep cadence (task 11.3). */
 export const HIDE_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+
+// ---------------------------------------------------------------------------
+// Database path anchoring. This package is usually started through
+// `pnpm --filter @relaytg/app-docker start`, which runs the script from the
+// workspace package directory — so a *relative* DATABASE_PATH in .env would
+// resolve against the wrong cwd and silently split the database in two (the
+// "duplicate topics" incident: the new data landed in src/apps/docker/data/
+// while the historic one stayed at the repo root). Relative paths resolve
+// against the monorepo root (the directory owning pnpm-workspace.yaml), so the
+// same .env means the same file regardless of where the script is launched
+// from. ":memory:" and absolute paths pass through untouched (tests / Docker).
+// ---------------------------------------------------------------------------
+
+const APP_SRC_DIR = dirname(fileURLToPath(import.meta.url));
+
+/** Walk up from a dir until a directory holding pnpm-workspace.yaml; fall back
+ *  to the starting dir (standalone checkout without the monorepo marker). */
+function findMonorepoRoot(fromDir: string): string {
+  let dir = fromDir;
+  for (let i = 0; i < 12; i++) {
+    if (existsSync(resolve(dir, "pnpm-workspace.yaml"))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return fromDir;
+}
+
+/** Monorepo root anchor (repo root when run inside the repo, else app dir). */
+export const MONOREPO_ROOT = findMonorepoRoot(APP_SRC_DIR);
+
+/** Absolute SQLite file location for a config databasePath. */
+export function resolveDatabasePath(dbPath: string): string {
+  if (dbPath === ":memory:") return dbPath;
+  if (isAbsolute(dbPath)) return dbPath;
+  return resolve(MONOREPO_ROOT, dbPath);
+}
 
 /** Webhook body cap. Telegram update payloads are small (media arrive as
  *  file_id references), so a bigger body is a misdirected client or an abuse
@@ -73,7 +109,7 @@ export async function createApp(deps: AppDeps): Promise<RelayApp> {
   const config = loadConfig(deps.env);
   const logger = deps.logger ?? new ConsoleLogger({ component: "docker" });
 
-  const dbPath = deps.databasePath ?? config.databasePath;
+  const dbPath = deps.databasePath ?? resolveDatabasePath(config.databasePath);
   mkdirSync(dirname(dbPath), { recursive: true });
   const sql = NodeSqliteDb.open(dbPath);
   if (deps.migrateOnBoot !== false) {
@@ -92,43 +128,15 @@ export async function createApp(deps: AppDeps): Promise<RelayApp> {
       retries: config.telegramRetry.retries,
       baseBackoffMs: config.telegramRetry.baseBackoffMs,
     });
-  // Resolve the bot's own identity once so /delete can refuse the bot's own
-  // conversation alongside the requester's and staff's. Boot must not fail on
-  // a Telegram hiccup — a failed probe just leaves that guard unarmed.
-  let botTelegramUserId: number | undefined;
-  try {
-    botTelegramUserId = (await telegram.getMe()).id;
-  } catch {
-    logger.warn("system_error", { errorKind: "bot_identity_unavailable" });
-  }
-  const services = buildServices({
+  const services = await bootServices({
+    config,
+    logger,
     db,
     telegram,
     runtime: deps.runtime ?? new WallClockRuntime(),
-    config,
-    logger,
     verificationStore: deps.verificationStore ?? new InMemoryVerificationStore(),
     serializer: deps.serializer ?? new KeyedMutexSerializer(),
-    botTelegramUserId,
   });
-  await services.operators.seed();
-  // Register the Telegram command menu: /start in every private chat, plus
-  // per-person admin/operator menus in the support group from the operator
-  // registry. Each scope is guarded internally, so a Telegram hiccup at boot
-  // never blocks the webhook server.
-  await setCommandMenu(telegram, config, logger, () => services.operators.list());
-  // Re-apply any persisted `/lang` preferences so a user who chose 简体中文
-  // keeps the Chinese suggestion menu across restarts.
-  await syncPreferredLanguageMenus(db, telegram, config, logger, () => services.operators.list());
-
-  // Boot config self-check: verify the token resolves to a bot, the support
-  // group is a forum, and the bot is an admin there — then log the verdict.
-  // Fire-and-forget: a misconfigured deployment must never block the webhook
-  // server from starting.
-  void services.selfCheck
-    .run()
-    .then((report) => logger.info("selfcheck", { status: report.allOk ? "ok" : "failed" }))
-    .catch(() => {});
 
   return {
     config,

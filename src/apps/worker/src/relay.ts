@@ -16,10 +16,8 @@ import { SqliteDatabase } from "@relaytg/adapter-sqlite/repository";
 import {
   InMemoryVerificationStore,
   WallClockRuntime,
-  buildServices,
+  bootServices,
   immediateSerializer,
-  setCommandMenu,
-  syncPreferredLanguageMenus,
   type CoreServices,
 } from "@relaytg/core";
 import type { Database, Runtime, Serializer, TelegramClient, VerificationStore } from "@relaytg/core";
@@ -72,43 +70,21 @@ export async function buildRelay(deps: RelayDeps): Promise<Relay> {
       retries: config.telegramRetry.retries,
       baseBackoffMs: config.telegramRetry.baseBackoffMs,
     });
-  // Resolve the bot's own identity once so /delete can refuse the bot's own
-  // conversation alongside the requester's and staff's. Boot must not fail on
-  // a Telegram hiccup — a failed probe just leaves that guard unarmed.
-  let botTelegramUserId: number | undefined;
-  try {
-    botTelegramUserId = (await telegram.getMe()).id;
-  } catch {
-    logger.warn("system_error", { errorKind: "bot_identity_unavailable" });
-  }
-  const services = buildServices({
+  const services = await bootServices({
+    config,
+    logger,
     db,
     telegram,
     runtime: deps.runtime ?? new WallClockRuntime(),
-    config,
-    logger,
     verificationStore: deps.verificationStore ?? new InMemoryVerificationStore(),
     serializer: deps.serializer ?? immediateSerializer,
-    botTelegramUserId,
+    // Boot self-check, logged once per isolate (see the guard above).
+    selfCheckGate: () => {
+      if (selfChecked) return false;
+      selfChecked = true;
+      return true;
+    },
   });
-  await services.operators.seed();
-  // Register the Telegram command menu: /start in every private chat, plus
-  // per-person admin/operator menus in the support group from the operator
-  // registry. Each scope is guarded internally, so a Telegram hiccup never
-  // fails the relay build.
-  await setCommandMenu(telegram, config, logger, () => services.operators.list());
-  // Re-apply any persisted `/lang` preferences so the suggestion menu follows
-  // the stored preference even when the Telegram client language differs.
-  await syncPreferredLanguageMenus(db, telegram, config, logger, () => services.operators.list());
-
-  // Boot config self-check, logged once per isolate (see the guard above).
-  if (!selfChecked) {
-    selfChecked = true;
-    void services.selfCheck
-      .run()
-      .then((report) => logger.info("selfcheck", { status: report.allOk ? "ok" : "failed" }))
-      .catch(() => {});
-  }
 
   return {
     config,

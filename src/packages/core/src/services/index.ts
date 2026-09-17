@@ -46,6 +46,8 @@ export { CommandService } from "./command-service.ts";
 export type { CommandsDeps } from "./command-service.ts";
 export { UpdateProcessor } from "./update-processor.ts";
 export type { ProcessDeps } from "./update-processor.ts";
+export { bootServices } from "./assemble.ts";
+export type { BootServicesOptions } from "./assemble.ts";
 
 import type { ServiceContext } from "./service-context.ts";
 import { setCommandMenu, applyUserMenu, type UserMenuChoice } from "./command-menu.ts";
