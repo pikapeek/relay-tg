@@ -7,9 +7,11 @@
 import { describe, expect, it } from "vitest";
 import { loadConfig, type Config, type UserProfile } from "@relaytg/shared";
 import {
+  botRegistryFrom,
   buildServices,
   generateArithmeticQuestion,
   OPERATOR_COMMANDS,
+  type BotRegistry,
   type ServiceContext,
 } from "./index.ts";
 import {
@@ -24,7 +26,7 @@ import { TEXTS } from "./texts.ts";
 
 function baseConfig(): Config {
   return loadConfig({
-    BOT_TOKEN: "test-token",
+    BOTS: "main:test-token",
     GROUP_ID: "-100123456789",
     ADMIN_IDS: "111",
     OPERATOR_IDS: "222,333",
@@ -35,6 +37,7 @@ interface Harness {
   ctx: ServiceContext;
   db: MemoryDatabase;
   telegram: FakeTelegramClient;
+  bots: BotRegistry;
   runtime: FakeRuntime;
   logger: CaptureLogger;
   store: MemoryVerificationStore;
@@ -46,8 +49,17 @@ function makeHarness(config: Config = baseConfig()): Harness {
   const runtime = new FakeRuntime();
   const logger = new CaptureLogger();
   const store = new MemoryVerificationStore();
-  const ctx: ServiceContext = { db, telegram, runtime, config, logger, verificationStore: store, serializer: immediateSerializer };
-  return { ctx, db, telegram, runtime, logger, store };
+  const clients = config.bots.map((_bot, i) => (i === 0 ? telegram : new FakeTelegramClient()));
+  const bots = botRegistryFrom(
+    config.bots.map((bot, i) => ({
+      botId: bot.id,
+      client: clients[i]!,
+      botTelegramUserId: clients[i]!.meResult.id,
+      botUsername: clients[i]!.meResult.username,
+    })),
+  );
+  const ctx: ServiceContext = { db, telegram, bots, runtime, config, logger, verificationStore: store, serializer: immediateSerializer };
+  return { ctx, db, telegram, bots, runtime, logger, store };
 }
 
 function profile(telegramUserId: number, overrides: Partial<UserProfile> = {}): UserProfile {
@@ -75,8 +87,8 @@ describe("UserService", () => {
     const { user, created } = await services.users.getOrCreate(profile(42));
     expect(created).toBe(true);
     expect(user.telegramUserId).toBe(42);
-    expect(user.verifiedAt).toBeNull();
     expect(user.approvedAt).toBeNull();
+    expect(await h.db.users.getVerifiedAt("main", 42)).toBeNull();
     expect(h.logger.has("user_created")).toBe(true);
   });
 
@@ -98,16 +110,19 @@ describe("UserService", () => {
     expect(services.users.rejectionReason(profile(7))).toBeNull();
   });
 
-  it("marks the verified flag idempotently", async () => {
+  it("marks the verified flag idempotently, per bot", async () => {
     const h = makeHarness();
     const services = buildServices(h.ctx);
     await services.users.getOrCreate(profile(42));
-    await services.users.markVerified(42);
-    const first = await services.users.getByTelegramUserId(42);
-    expect(first?.verifiedAt).not.toBeNull();
-    await services.users.markVerified(42);
-    const second = await services.users.getByTelegramUserId(42);
-    expect(second?.verifiedAt).toBe(first?.verifiedAt);
+    await services.users.markVerified(42, h.bots.primary());
+    const first = await h.db.users.getVerifiedAt("main", 42);
+    expect(first).not.toBeNull();
+    await services.users.markVerified(42, h.bots.primary());
+    const second = await h.db.users.getVerifiedAt("main", 42);
+    expect(second).toBe(first);
+    // The flag is bot-scoped: nothing is recorded for a bot the user never
+    // verified on.
+    expect(await h.db.users.getVerifiedAt("other", 42)).toBeNull();
   });
 });
 
@@ -120,8 +135,8 @@ describe("ConversationService", () => {
     const h = makeHarness();
     const services = buildServices(h.ctx);
     const user = (await services.users.getOrCreate(profile(42))).user;
-    const first = await services.conversations.ensureForUser(user);
-    const second = await services.conversations.ensureForUser(user);
+    const first = await services.conversations.ensureForUser(user, h.bots.primary());
+    const second = await services.conversations.ensureForUser(user, h.bots.primary());
     expect(first.created).toBe(true);
     expect(second.created).toBe(false);
     expect(second.conversation.id).toBe(first.conversation.id);
@@ -131,7 +146,7 @@ describe("ConversationService", () => {
     const h = makeHarness();
     const services = buildServices(h.ctx);
     const user = (await services.users.getOrCreate(profile(42))).user;
-    const { conversation } = await services.conversations.ensureForUser(user);
+    const { conversation } = await services.conversations.ensureForUser(user, h.bots.primary());
     expect(conversation.assignedOperatorId).toBeNull();
     const messageId = await h.telegram.sendContent(
       { chatId: conversation.telegramTopicId!, messageThreadId: conversation.telegramTopicId! },
@@ -144,7 +159,7 @@ describe("ConversationService", () => {
     const h = makeHarness();
     const services = buildServices(h.ctx);
     const user = (await services.users.getOrCreate(profile(42))).user;
-    const { conversation } = await services.conversations.ensureForUser(user);
+    const { conversation } = await services.conversations.ensureForUser(user, h.bots.primary());
     await services.conversations.setAssignedOperatorId(conversation.id, "op-1");
     const after = await services.conversations.getById(conversation.id);
     expect(after?.assignedOperatorId).toBe("op-1");
@@ -154,7 +169,7 @@ describe("ConversationService", () => {
     const h = makeHarness();
     const services = buildServices(h.ctx);
     const user = (await services.users.getOrCreate(profile(42))).user;
-    const { conversation } = await services.conversations.ensureForUser(user);
+    const { conversation } = await services.conversations.ensureForUser(user, h.bots.primary());
     h.runtime.advance(HOUR);
     await services.conversations.touchActivity(conversation.id);
     const after = await services.conversations.getById(conversation.id);
@@ -165,14 +180,14 @@ describe("ConversationService", () => {
     const h = makeHarness();
     const services = buildServices(h.ctx);
     const user = (await services.users.getOrCreate(profile(42))).user;
-    const { conversation } = await services.conversations.ensureForUser(user);
+    const { conversation } = await services.conversations.ensureForUser(user, h.bots.primary());
     const topicId = conversation.telegramTopicId!;
     await h.db.messages.create(
-      { conversationId: conversation.id, telegramChatId: 42, telegramMessageId: 1, telegramTopicId: topicId, relayedMessageId: 201, direction: "USER_TO_OPERATOR", senderType: "USER", contentType: "text", replyToMessageId: null },
+      { conversationId: conversation.id, botId: "main", telegramChatId: 42, telegramMessageId: 1, telegramTopicId: topicId, relayedMessageId: 201, direction: "USER_TO_OPERATOR", senderType: "USER", contentType: "text", replyToMessageId: null },
       h.runtime.now(),
     );
     await h.db.messages.create(
-      { conversationId: conversation.id, telegramChatId: 42, telegramMessageId: 2, telegramTopicId: topicId, relayedMessageId: 202, direction: "USER_TO_OPERATOR", senderType: "USER", contentType: "text", replyToMessageId: null },
+      { conversationId: conversation.id, botId: "main", telegramChatId: 42, telegramMessageId: 2, telegramTopicId: topicId, relayedMessageId: 202, direction: "USER_TO_OPERATOR", senderType: "USER", contentType: "text", replyToMessageId: null },
       h.runtime.now(),
     );
     await h.db.notes.create({ conversationId: conversation.id, operatorId: "op-1", text: "internal note" }, h.runtime.now());
@@ -192,21 +207,21 @@ describe("ConversationService", () => {
 // ---------------------------------------------------------------------------
 
 describe("TopicService", () => {
-  it("names topics `DisplayName | telegram_user_id`", async () => {
+  it("names topics `botId | DisplayName | telegram_user_id`", async () => {
     const h = makeHarness();
     const services = buildServices(h.ctx);
     const user = (await services.users.getOrCreate(profile(42, { firstName: "Jason" }))).user;
     const topicId = await services.topics.createTopic(user);
     expect(topicId).toBeGreaterThan(0);
     const call = h.telegram.callsOf("createForumTopic")[0];
-    expect(call.payload.name).toBe("Jason | 42");
+    expect(call.payload.name).toBe("main | Jason | 42");
   });
 
   it("stores the created topic id on the conversation and routes by it", async () => {
     const h = makeHarness();
     const services = buildServices(h.ctx);
     const user = (await services.users.getOrCreate(profile(42))).user;
-    const { conversation } = await services.conversations.ensureForUser(user);
+    const { conversation } = await services.conversations.ensureForUser(user, h.bots.primary());
     expect(conversation.telegramTopicId).not.toBeNull();
     const routed = await services.conversations.getByTopicId(conversation.telegramTopicId!);
     expect(routed?.id).toBe(conversation.id);
@@ -216,7 +231,7 @@ describe("TopicService", () => {
     const h = makeHarness();
     const services = buildServices(h.ctx);
     const user = (await services.users.getOrCreate(profile(42))).user;
-    const { conversation } = await services.conversations.ensureForUser(user);
+    const { conversation } = await services.conversations.ensureForUser(user, h.bots.primary());
     // Simulate a manually-deleted topic (as if an operator removed it).
     h.telegram.topics.delete(conversation.telegramTopicId!);
     await expect(services.conversations.deleteConversation(conversation)).resolves.not.toThrow();
@@ -279,12 +294,12 @@ describe("VerificationService", () => {
   it("issues a challenge with four choice buttons", async () => {
     const h = makeHarness();
     const services = buildServices(h.ctx);
-    await services.verification.startChallenge(profile(42));
+    await services.verification.startChallenge(profile(42), h.bots.primary());
     const call = h.telegram.lastCall()!;
     expect(call.method).toBe("sendMessage");
     expect(call.target.chatId).toBe(42);
     expect(call.replyMarkup?.buttons).toHaveLength(4);
-    const state = await h.store.get(42);
+    const state = await h.store.get("main", 42);
     expect(state).not.toBeNull();
     expect(state!.attemptsLeft).toBe(3);
   });
@@ -293,25 +308,24 @@ describe("VerificationService", () => {
     const h = makeHarness();
     const services = buildServices(h.ctx);
     await services.users.getOrCreate(profile(42));
-    await services.verification.startChallenge(profile(42));
-    const state = (await h.store.get(42))!;
-    const outcome = await services.verification.answer(profile(42), state.answer);
+    await services.verification.startChallenge(profile(42), h.bots.primary());
+    const state = (await h.store.get("main", 42))!;
+    const outcome = await services.verification.answer(profile(42), state.answer, h.bots.primary());
     expect(outcome.outcome).toBe("correct");
-    expect(await h.store.get(42)).toBeNull();
-    const user = await services.users.getByTelegramUserId(42);
-    expect(user?.verifiedAt).not.toBeNull();
+    expect(await h.store.get("main", 42)).toBeNull();
+    expect(await h.db.users.getVerifiedAt("main", 42)).not.toBeNull();
     expect(h.logger.has("verification_correct")).toBe(true);
   });
 
   it("a wrong choice re-asks in place, consuming an attempt", async () => {
     const h = makeHarness();
     const services = buildServices(h.ctx);
-    await services.verification.startChallenge(profile(42));
-    const state = (await h.store.get(42))!;
+    await services.verification.startChallenge(profile(42), h.bots.primary());
+    const state = (await h.store.get("main", 42))!;
     const wrong = state.choices.find((c) => c !== state.answer)!;
-    const outcome = await services.verification.answer(profile(42), wrong);
+    const outcome = await services.verification.answer(profile(42), wrong, h.bots.primary());
     expect(outcome.outcome).toBe("wrong");
-    const after = (await h.store.get(42))!;
+    const after = (await h.store.get("main", 42))!;
     expect(after.attemptsLeft).toBe(state.attemptsLeft - 1);
     const edits = h.telegram.callsOf("editMessageText");
     expect(edits.length).toBe(1);
@@ -322,10 +336,10 @@ describe("VerificationService", () => {
   it("non-button content re-asks without consuming an attempt", async () => {
     const h = makeHarness();
     const services = buildServices(h.ctx);
-    await services.verification.startChallenge(profile(42));
-    const before = (await h.store.get(42))!.attemptsLeft;
-    await services.verification.nonButtonContent(profile(42));
-    const after = (await h.store.get(42))!;
+    await services.verification.startChallenge(profile(42), h.bots.primary());
+    const before = (await h.store.get("main", 42))!.attemptsLeft;
+    await services.verification.nonButtonContent(profile(42), h.bots.primary());
+    const after = (await h.store.get("main", 42))!;
     expect(after.attemptsLeft).toBe(before);
     expect(h.telegram.callsOf("editMessageText").length).toBe(1);
   });
@@ -333,49 +347,65 @@ describe("VerificationService", () => {
   it("exhausts attempts and clears the challenge", async () => {
     const h = makeHarness(loadConfig({ ...envWithToken(), VERIFY_ATTEMPTS: "1" }));
     const services = buildServices(h.ctx);
-    await services.verification.startChallenge(profile(42));
-    const state = (await h.store.get(42))!;
+    await services.verification.startChallenge(profile(42), h.bots.primary());
+    const state = (await h.store.get("main", 42))!;
     const wrong = state.choices.find((c) => c !== state.answer)!;
-    const outcome = await services.verification.answer(profile(42), wrong);
+    const outcome = await services.verification.answer(profile(42), wrong, h.bots.primary());
     expect(outcome.outcome).toBe("exhausted");
-    expect(await h.store.get(42)).toBeNull();
+    expect(await h.store.get("main", 42)).toBeNull();
   });
 
   it("expires lazily when the TTL passes", async () => {
     const h = makeHarness();
     const services = buildServices(h.ctx);
-    await services.verification.startChallenge(profile(42));
+    await services.verification.startChallenge(profile(42), h.bots.primary());
     h.runtime.advance(301_000);
-    const state = (await h.store.get(42))!;
-    const outcome = await services.verification.answer(profile(42), state.answer);
+    const state = (await h.store.get("main", 42))!;
+    const outcome = await services.verification.answer(profile(42), state.answer, h.bots.primary());
     expect(outcome.outcome).toBe("expired");
-    expect(await h.store.get(42)).toBeNull();
+    expect(await h.store.get("main", 42)).toBeNull();
     expect(h.logger.has("verification_expired")).toBe(true);
   });
 
   it("restarts with a fresh challenge on the next contact after expiry", async () => {
     const h = makeHarness();
     const services = buildServices(h.ctx);
-    await services.verification.startChallenge(profile(42));
+    await services.verification.startChallenge(profile(42), h.bots.primary());
     h.runtime.advance(301_000);
-    await services.verification.nonButtonContent(profile(42));
-    const state = (await h.store.get(42))!;
+    await services.verification.nonButtonContent(profile(42), h.bots.primary());
+    const state = (await h.store.get("main", 42))!;
     expect(state.attemptsLeft).toBe(h.ctx.config.verification.attempts);
     const sends = h.telegram.callsOf("sendMessage");
     expect(sends.filter((c) => c.replyMarkup != null)).toHaveLength(2);
   });
 
-  it("is skipped for already-verified or already-approved users", async () => {
-    const h = makeHarness();
+  it("skips the per-bot gate once verified on this bot or approved anywhere", async () => {
+    const h = makeHarness(
+      loadConfig({ BOTS: "main:test-token,second:test-token-2", GROUP_ID: "-100123456789" }),
+    );
     const services = buildServices(h.ctx);
-    expect(services.verification.isEligible({ verifiedAt: null, approvedAt: null })).toBe(true);
-    expect(services.verification.isEligible({ verifiedAt: "2026-01-01T00:00:00Z", approvedAt: null })).toBe(false);
-    expect(services.verification.isEligible({ verifiedAt: null, approvedAt: "2026-01-01T00:00:00Z" })).toBe(false);
+    await services.users.getOrCreate(profile(42));
+    const userOf = async (id: number) => (await h.db.users.getByTelegramUserId(id))!;
+
+    // A fresh user is eligible on the primary bot.
+    expect(await services.verification.isEligible(h.bots.primary(), await userOf(42))).toBe(true);
+    // Verified on this bot → no longer eligible here …
+    await services.users.markVerified(42, h.bots.primary());
+    expect(await services.verification.isEligible(h.bots.primary(), await userOf(42))).toBe(false);
+    // … but verified on ANOTHER bot never grants anything on this one: the
+    // per-bot records are independent, so the second-bot mark leaves the
+    // primary-bot gate closed.
+    await h.db.users.clearVerified("main", 42);
+    await services.users.markVerified(42, h.bots.get("second"));
+    expect(await services.verification.isEligible(h.bots.primary(), await userOf(42))).toBe(true);
+    // Approval is global — an approved human is trusted on every bot.
+    await h.db.users.setApprovedAt(42, h.runtime.now());
+    expect(await services.verification.isEligible(h.bots.primary(), await userOf(42))).toBe(false);
   });
 });
 
 function envWithToken(): Record<string, string> {
-  return { BOT_TOKEN: "test-token", GROUP_ID: "-100123456789" };
+  return { BOTS: "main:test-token", GROUP_ID: "-100123456789" };
 }
 
 // ---------------------------------------------------------------------------
@@ -386,7 +416,7 @@ describe("ApprovalService", () => {
   it("creates one pending application and posts the notification", async () => {
     const h = makeHarness();
     const services = buildServices(h.ctx);
-    const outcome = await services.approvals.apply(profile(42, { username: "jason" }));
+    const outcome = await services.approvals.apply(profile(42, { username: "jason" }), h.bots.primary());
     expect(outcome).toBe("submitted");
     const app = await h.db.applications.getLatestByTelegramUserId(42);
     expect(app?.status).toBe("pending");
@@ -403,8 +433,8 @@ describe("ApprovalService", () => {
   it("is a no-op while an application is pending", async () => {
     const h = makeHarness();
     const services = buildServices(h.ctx);
-    await services.approvals.apply(profile(42));
-    const outcome = await services.approvals.apply(profile(42));
+    await services.approvals.apply(profile(42), h.bots.primary());
+    const outcome = await services.approvals.apply(profile(42), h.bots.primary());
     expect(outcome).toBe("pending");
     const repliesTo42 = h.telegram.callsOf("sendMessage").filter((c) => c.target.chatId === 42);
     const reply = repliesTo42[repliesTo42.length - 1];
@@ -417,9 +447,9 @@ describe("ApprovalService", () => {
     const h = makeHarness();
     const services = buildServices(h.ctx);
     await services.operators.seed();
-    await services.approvals.apply(profile(42));
+    await services.approvals.apply(profile(42), h.bots.primary());
     const app = (await h.db.applications.getLatestByTelegramUserId(42))!;
-    const outcome = await services.approvals.decide(profile(111), "approve", app.id, "q1");
+    const outcome = await services.approvals.decide(profile(111), "approve", app.id, "q1", h.bots.primary());
     expect(outcome).toBe("handled");
     const user = await services.users.getByTelegramUserId(42);
     expect(user?.approvedAt).not.toBeNull();
@@ -441,7 +471,7 @@ describe("ApprovalService", () => {
     // Stating the purpose opens the conversation (despite the OPERATOR role).
     // No welcome message is sent to the user's private chat.
     await services.users.setPurpose(42, "refund help");
-    await services.conversations.grantAccess(user!);
+    await services.conversations.grantAccess(user!, h.bots.primary());
     const conversation = await services.conversations.getByTelegramUserId(42);
     expect(conversation).not.toBeNull();
     expect(conversation!.telegramTopicId).not.toBeNull();
@@ -453,9 +483,9 @@ describe("ApprovalService", () => {
     const h = makeHarness();
     const services = buildServices(h.ctx);
     await services.operators.seed();
-    await services.approvals.apply(profile(42));
+    await services.approvals.apply(profile(42), h.bots.primary());
     const app = (await h.db.applications.getLatestByTelegramUserId(42))!;
-    const outcome = await services.approvals.decide(profile(111), "reject", app.id, "q1");
+    const outcome = await services.approvals.decide(profile(111), "reject", app.id, "q1", h.bots.primary());
     expect(outcome).toBe("handled");
     const user = await services.users.getByTelegramUserId(42);
     expect(user?.approvedAt).toBeNull();
@@ -469,10 +499,10 @@ describe("ApprovalService", () => {
     const h = makeHarness();
     const services = buildServices(h.ctx);
     await services.operators.seed();
-    await services.approvals.apply(profile(42));
+    await services.approvals.apply(profile(42), h.bots.primary());
     const first = (await h.db.applications.getLatestByTelegramUserId(42))!;
-    await services.approvals.decide(profile(111), "reject", first.id, "q1");
-    const outcome = await services.approvals.apply(profile(42));
+    await services.approvals.decide(profile(111), "reject", first.id, "q1", h.bots.primary());
+    const outcome = await services.approvals.apply(profile(42), h.bots.primary());
     expect(outcome).toBe("submitted");
     const second = (await h.db.applications.getLatestByTelegramUserId(42))!;
     expect(second.id).not.toBe(first.id);
@@ -487,7 +517,7 @@ describe("ApprovalService", () => {
     await services.users.getOrCreate(profile(42));
     await services.users.getOrCreate(profile(42));
     await h.db.users.setApprovedAt(42, h.runtime.now());
-    const outcome = await services.approvals.apply(profile(42));
+    const outcome = await services.approvals.apply(profile(42), h.bots.primary());
     expect(outcome).toBe("already_approved");
     expect([...h.db.applications.rows.values()].filter((a) => a.telegramUserId === 42)).toHaveLength(0);
   });
@@ -496,9 +526,9 @@ describe("ApprovalService", () => {
     const h = makeHarness();
     const services = buildServices(h.ctx);
     await services.operators.seed();
-    await services.approvals.apply(profile(42));
+    await services.approvals.apply(profile(42), h.bots.primary());
     const app = (await h.db.applications.getLatestByTelegramUserId(42))!;
-    const outcome = await services.approvals.decide(profile(222), "approve", app.id, "q1");
+    const outcome = await services.approvals.decide(profile(222), "approve", app.id, "q1", h.bots.primary());
     expect(outcome).toBe("unauthorized");
     expect(await h.db.applications.getById(app.id)).toMatchObject({ status: "pending" });
     expect(h.telegram.answers.find((a) => a.callbackQueryId === "q1")?.showAlert).toBe(true);
@@ -508,10 +538,10 @@ describe("ApprovalService", () => {
     const h = makeHarness();
     const services = buildServices(h.ctx);
     await services.operators.seed();
-    await services.approvals.apply(profile(42));
+    await services.approvals.apply(profile(42), h.bots.primary());
     const app = (await h.db.applications.getLatestByTelegramUserId(42))!;
-    await services.approvals.decide(profile(111), "approve", app.id, "q1");
-    const outcome = await services.approvals.decide(profile(111), "reject", app.id, "q2");
+    await services.approvals.decide(profile(111), "approve", app.id, "q1", h.bots.primary());
+    const outcome = await services.approvals.decide(profile(111), "reject", app.id, "q2", h.bots.primary());
     expect(outcome).toBe("already_decided");
     expect(await h.db.applications.getById(app.id)).toMatchObject({ status: "approved" });
     expect(h.telegram.answers.find((a) => a.callbackQueryId === "q2")?.showAlert).toBe(true);
@@ -525,7 +555,7 @@ describe("ApprovalService", () => {
 async function seededConversation(h: Harness, telegramUserId: number): Promise<{ id: string; topicId: number }> {
   const topicId = h.telegram.seedTopic();
   const conversation = await h.db.conversations.create(
-    { telegramUserId, telegramTopicId: topicId, assignedOperatorId: null },
+    { botId: "main", telegramUserId, telegramTopicId: topicId, assignedOperatorId: null },
     h.runtime.now(),
   );
   return { id: conversation.id, topicId };

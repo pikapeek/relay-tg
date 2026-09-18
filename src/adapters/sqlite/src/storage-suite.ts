@@ -104,7 +104,7 @@ export function storageSuite(label: string, makeDb: () => Promise<SqlDb>, migrat
         const created = await db.users.upsertProfile(profile(1), NOW);
         expect(created.created).toBe(true);
         expect(created.user.telegramUserId).toBe(1);
-        expect(created.user.verifiedAt).toBeNull();
+        expect(await db.users.getVerifiedAt("primary", 1)).toBeNull();
         expect(created.user.approvedAt).toBeNull();
         expect(created.user.isBot).toBe(false);
 
@@ -134,14 +134,25 @@ export function storageSuite(label: string, makeDb: () => Promise<SqlDb>, migrat
         await db.users.setPreferredLanguage(1, null, NOW);
         expect((await db.users.getByTelegramUserId(1))?.preferredLanguage).toBeNull();
 
-        await db.users.setVerifiedAt(1, NOW);
-        expect((await db.users.getByTelegramUserId(1))?.verifiedAt).toBe(NOW.toISOString());
+        await db.users.setVerifiedAt("primary", 1, NOW);
+        expect(await db.users.getVerifiedAt("primary", 1)).toBe(NOW.toISOString());
+        // Verification is per (bot, user): the record on another bot is
+        // independent, and clearVerified removes only the named bot's mark.
+        expect(await db.users.getVerifiedAt("other", 1)).toBeNull();
+        await db.users.setVerifiedAt("other", 1, NOW);
+        await db.users.clearVerified("primary", 1);
+        expect(await db.users.getVerifiedAt("primary", 1)).toBeNull();
+        expect(await db.users.getVerifiedAt("other", 1)).toBe(NOW.toISOString());
+        await db.users.clearVerified("other", 1);
+        await db.users.setVerifiedAt("primary", 1, NOW);
         await db.users.setApprovedAt(1, NOW);
         expect((await db.users.getByTelegramUserId(1))?.approvedAt).toBe(NOW.toISOString());
 
         // purpose starts NULL, is settable, survives a profile refresh, and the
-        // access reset clears verified_at/approved_at AND the purpose so the
-        // next conversation re-asks for a fresh one.
+        // access reset clears approved_at AND the purpose so the next
+        // conversation re-asks for a fresh one. The per-(bot,user) verification
+        // mark is NOT part of resetAccess — clearVerified() owns it — so it
+        // survives a reset untouched.
         expect((await db.users.getByTelegramUserId(1))?.purpose).toBeNull();
         await db.users.setPurpose(1, "refund help", NOW);
         expect((await db.users.getByTelegramUserId(1))?.purpose).toBe("refund help");
@@ -150,15 +161,17 @@ export function storageSuite(label: string, makeDb: () => Promise<SqlDb>, migrat
         expect((await db.users.getByTelegramUserId(1))?.purpose).toBe("refund help");
         await db.users.resetAccess(1);
         const reset = await db.users.getByTelegramUserId(1);
-        expect(reset?.verifiedAt).toBeNull();
+        expect(await db.users.getVerifiedAt("primary", 1)).toBe(NOW.toISOString());
         expect(reset?.approvedAt).toBeNull();
         expect(reset?.purpose).toBeNull();
         expect(reset?.purposeAt).toBeNull();
+        await db.users.clearVerified("primary", 1);
+        expect(await db.users.getVerifiedAt("primary", 1)).toBeNull();
       });
 
       it("conversations: create, lookups, topic/assignment/activity/hide updates, delete", async () => {
         await db.users.upsertProfile(profile(1), NOW);
-        const row = await db.conversations.create({ telegramUserId: 1, telegramTopicId: 42, assignedOperatorId: null }, NOW);
+        const row = await db.conversations.create({ botId: "primary", telegramUserId: 1, telegramTopicId: 42, assignedOperatorId: null }, NOW);
         expect(row.telegramTopicId).toBe(42);
         expect(row.hiddenAt).toBeNull();
         expect(row.hideAfterHours).toBeNull();
@@ -195,7 +208,7 @@ export function storageSuite(label: string, makeDb: () => Promise<SqlDb>, migrat
         // policy is set separately.
         const make = (id: number, last: Date, hideAfterHours: number | null) =>
           db.conversations
-            .create({ telegramUserId: id, telegramTopicId: id * 100, assignedOperatorId: null }, last)
+            .create({ botId: "primary", telegramUserId: id, telegramTopicId: id * 100, assignedOperatorId: null }, last)
             .then((c) => db.conversations.setHideAfterHours(c.id, hideAfterHours));
         const hours = (n: number) => new Date(NOW.getTime() - n * HOUR);
         const autoHideHours = 168; // 7-day hard cap
@@ -220,11 +233,12 @@ export function storageSuite(label: string, makeDb: () => Promise<SqlDb>, migrat
 
       it("messages: create with source keys, source/relayed-id resolution, last-message, delete", async () => {
         await db.users.upsertProfile(profile(1), NOW);
-        const conv = await db.conversations.create({ telegramUserId: 1, telegramTopicId: 42, assignedOperatorId: null }, NOW);
+        const conv = await db.conversations.create({ botId: "primary", telegramUserId: 1, telegramTopicId: 42, assignedOperatorId: null }, NOW);
 
         const msg = await db.messages.create(
           {
             conversationId: conv.id,
+            botId: "primary",
             telegramChatId: 100,
             telegramMessageId: 200,
             telegramTopicId: 42,
@@ -264,7 +278,7 @@ export function storageSuite(label: string, makeDb: () => Promise<SqlDb>, migrat
 
         // notes
         await db.users.upsertProfile(profile(1), NOW);
-        const conv = await db.conversations.create({ telegramUserId: 1, telegramTopicId: 1, assignedOperatorId: null }, NOW);
+        const conv = await db.conversations.create({ botId: "primary", telegramUserId: 1, telegramTopicId: 1, assignedOperatorId: null }, NOW);
         const note = await db.notes.create({ conversationId: conv.id, operatorId: op1.id, text: "internal" }, NOW);
         expect(note.text).toBe("internal");
         // The NoteRepository port exposes create + cascade-delete only, so check
@@ -279,11 +293,12 @@ export function storageSuite(label: string, makeDb: () => Promise<SqlDb>, migrat
 
       it("messages: full coverage of source/relayed/last/delete", async () => {
         await db.users.upsertProfile(profile(1), NOW);
-        const conv = await db.conversations.create({ telegramUserId: 1, telegramTopicId: 42, assignedOperatorId: null }, NOW);
+        const conv = await db.conversations.create({ botId: "primary", telegramUserId: 1, telegramTopicId: 42, assignedOperatorId: null }, NOW);
         const mk = (fromId: number, toId: number | null, at: Date) =>
           db.messages.create(
             {
               conversationId: conv.id,
+              botId: "primary",
               telegramChatId: 100,
               telegramMessageId: fromId,
               telegramTopicId: 42,
@@ -310,6 +325,7 @@ export function storageSuite(label: string, makeDb: () => Promise<SqlDb>, migrat
           db.messages.create(
             {
               conversationId: conv.id,
+              botId: "primary",
               telegramChatId: 900,
               telegramMessageId: fromId,
               telegramTopicId: 42,
@@ -360,10 +376,60 @@ export function storageSuite(label: string, makeDb: () => Promise<SqlDb>, migrat
         expect(updated?.decidedByTelegramUserId).toBe(99);
       });
 
-      it("processedUpdates: claim exactly once even under a frozen clock", async () => {
-        expect(await db.processedUpdates.claim(1, NOW)).toBe(true);
-        expect(await db.processedUpdates.claim(1, NOW)).toBe(false);
-        expect(await db.processedUpdates.claim(2, NOW)).toBe(true);
+      it("processedUpdates: claim exactly once per (bot, update) even under a frozen clock", async () => {
+        expect(await db.processedUpdates.claim("primary", 1, NOW)).toBe(true);
+        expect(await db.processedUpdates.claim("primary", 1, NOW)).toBe(false);
+        expect(await db.processedUpdates.claim("primary", 2, NOW)).toBe(true);
+        // Update ids increment per bot: the same id number claims independently
+        // on a second bot, and never conflicts back.
+        expect(await db.processedUpdates.claim("bot2", 1, NOW)).toBe(true);
+        expect(await db.processedUpdates.claim("bot2", 1, NOW)).toBe(false);
+        expect(await db.processedUpdates.claim("primary", 1, NOW)).toBe(false);
+      });
+
+      it("multi-bot: one conversation per (bot, user); identical message ids across bots coexist", async () => {
+        await db.users.upsertProfile(profile(1), NOW);
+
+        const a = await db.conversations.create({ botId: "bot1", telegramUserId: 1, telegramTopicId: 11, assignedOperatorId: null }, NOW);
+        const b = await db.conversations.create({ botId: "bot2", telegramUserId: 1, telegramTopicId: 12, assignedOperatorId: null }, NOW);
+        expect(a.id).not.toBe(b.id);
+
+        // Exact (bot, user) lookup returns the right conversation.
+        expect((await db.conversations.getByBotAndUser("bot1", 1))?.id).toBe(a.id);
+        expect((await db.conversations.getByBotAndUser("bot2", 1))?.id).toBe(b.id);
+        expect(await db.conversations.getByBotAndUser("bot3", 1)).toBeNull();
+
+        // getByTelegramUserId is a cross-bot fallback: the most recent one wins.
+        await db.conversations.touchActivity(a.id, new Date("2026-01-01T02:00:00.000Z"));
+        expect((await db.conversations.getByTelegramUserId(1))?.id).toBe(a.id);
+
+        await db.conversations.delete(a.id);
+        expect(await db.conversations.getByBotAndUser("bot1", 1)).toBeNull();
+        expect((await db.conversations.getByBotAndUser("bot2", 1))?.id).toBe(b.id);
+
+        // A user's private chat id is the same number on every bot, and message
+        // ids restart at 1 per bot — so (chat, message) == (1, 7) is recorded
+        // once per bot without clobbering.
+        const mk = (botId: string, conversationId: string) =>
+          db.messages.create(
+            {
+              conversationId,
+              botId,
+              telegramChatId: 1,
+              telegramMessageId: 7,
+              telegramTopicId: null,
+              relayedMessageId: null,
+              direction: "USER_TO_OPERATOR",
+              senderType: "USER",
+              contentType: "text",
+              replyToMessageId: null,
+            },
+            NOW,
+          );
+        const ma = await mk("bot1", a.id);
+        const mb = await mk("bot2", b.id);
+        expect(ma.id).not.toBe(mb.id); // the unique (bot_id, chat, message) allows both
+        expect((await db.messages.getBySource(1, 7))?.id).toBe(ma.id); // earliest row wins
       });
 
       it("settings: get/set and overwrite", async () => {

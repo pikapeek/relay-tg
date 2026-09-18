@@ -81,7 +81,7 @@ describe("flood restriction (9.2)", () => {
     const h = makeHarness(config);
     const services = buildServices(h.ctx);
     const { user } = await services.users.getOrCreate(profile(42));
-    await services.users.markVerified(user.telegramUserId);
+    await services.users.markVerified(user.telegramUserId, h.bots.primary());
     // A statement of purpose opens their conversation, so every burst message
     // below hits the relay path instead of being consumed as the first message.
     await services.users.setPurpose(user.telegramUserId, "test purpose");

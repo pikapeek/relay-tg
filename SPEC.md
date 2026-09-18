@@ -13,18 +13,19 @@ Telegram User ─► Telegram Bot ─► RelayTG ─► Support Forum Group
                                           └─► Topic per user (operators reply inside it)
 ```
 
-- Users message the Bot in private chat.
-- Each user maps to a dedicated **Forum Topic** in the support group, named `DisplayName | telegram_user_id`.
-- Operators reply by replying inside that topic (or via commands).
+- Users message any of the deployed **Bots** in private chat; all bots share **one support group**.
+- Each **(bot × user)** pair maps to a dedicated **Forum Topic** in the support group, named `botName | DisplayName | telegram_user_id` — a user talking to two bots gets two independent topics.
+- Operators reply by replying inside that topic (or via commands); each reply goes out through the **topic's own bot**.
 - Every message is recorded internally and relayed in both directions; replies and edits are preserved best-effort.
 - Optional human verification (`/start`) and customer-service applications (`/apply`) gate the creation of the first conversation.
+- Multi-bot support is the default mode: a single-bot deployment is just `BOTS="name:<token>"`.
 
 ## 2. Core design principles
 
 1. **One core, two runtimes.** All business logic lives in `src/packages/core`, which never touches runtime, Telegram, or storage APIs directly.
 2. **Platform independence.** Core depends only on injected ports: `Runtime`, `Database` (repository interfaces), `TelegramClient`, `Serializer`, `VerificationStore`, and a `Logger`. No Cloudflare APIs, no Node APIs, no file system, no SQLite driver, no HTTP framework.
 3. **Telegram is a transport.** Core never sees a raw Telegram Update. The adapter parses updates into internal events and maps internal messages into Bot API calls.
-4. **Simple-first.** No web admin, AI, PostgreSQL, Redis, multi-bot, payment, or CRM in the MVP. The architecture leaves room for them.
+4. **Simple-first.** No web admin, AI, PostgreSQL, Redis, payment, or CRM in the MVP. The architecture leaves room for them.
 
 ```text
 Telegram Update ─► Parser ─► Internal Event ─► Core ─► Internal Command ─► Mapper ─► Bot API
@@ -48,7 +49,7 @@ Telegram Update ─► Parser ─► Internal Event ─► Core ─► Internal 
                           └────────────────────────┘
                 │
         ┌───────┴──────────────┐
-        │ src/apps/docker      │  HTTP: POST /webhook, GET /health; hourly hide sweep
+        │ src/apps/docker      │  HTTP: POST /webhook[/<botId>], GET /health; hourly hide sweep
         │ src/apps/worker      │  Worker entry + ConversationDO; self-scheduled hide sweep
         └──────────────────────┘
 ```
@@ -68,25 +69,26 @@ Everything under `src/`: the pnpm workspaces (`apps`, `packages`, `adapters`), t
 
 ## 4. Data model
 
-SQLite schema (versioned `src/migrations/*.sql` — `001_initial`, `002_preferred_language`, `003_purpose`), applied by the migration runner on boot. The database is versioned and **never drop-and-recreated**.
+SQLite schema (versioned `src/migrations/*.sql` — `001_initial`, `002_preferred_language`, `003_purpose`, `004_multi_bot`, `005_per_bot_verification`), applied by the migration runner on boot. The database is versioned and **never drop-and-recreated**.
 
 | Table | Purpose | Key columns |
 | --- | --- | --- |
-| `users` | One row per Telegram identity | `telegram_user_id` (unique), `username` (display only), `verified_at`, `approved_at`, `purpose`, `purpose_at` |
-| `conversations` | One conversation per user; **no status lifecycle** | `telegram_user_id` (unique), `telegram_topic_id`, `assigned_operator_id` (informational), `last_activity_at`, `hidden_at`, `hide_after_hours` (null/`0` = permanent display policy; the global 7-day cap still applies) |
-| `messages` | Every relayed copy | `telegram_chat_id` + `telegram_message_id` (unique), `telegram_topic_id`, `relayed_message_id`, `direction`, `sender_type`, `content_type`, `reply_to_message_id` |
-| `operators` | Operator registry seeded from `OPERATOR_IDS` + `ADMIN_IDS` | `telegram_user_id` (unique), `role` (`ADMIN`/`OPERATOR`) |
+| `users` | One row per Telegram identity (**global** across bots) | `telegram_user_id` (unique), `username` (display only), `approved_at`, `purpose`, `purpose_at` |
+| `user_verifications` | Human-verification marks — **per (bot, user)** | `bot_id` + `telegram_user_id` (primary key), `verified_at` |
+| `conversations` | One conversation per **(bot, user)**; **no status lifecycle** | `bot_id` + `telegram_user_id` (unique), `telegram_topic_id`, `assigned_operator_id` (informational), `last_activity_at`, `hidden_at`, `hide_after_hours` (null/`0` = permanent display policy; the global 7-day cap still applies) |
+| `messages` | Every relayed copy | `bot_id` + `telegram_chat_id` + `telegram_message_id` (unique per source), `telegram_topic_id`, `relayed_message_id`, `direction`, `sender_type`, `content_type`, `reply_to_message_id` |
+| `operators` | Operator registry seeded from `OPERATOR_IDS` + `ADMIN_IDS` (**global**) | `telegram_user_id` (unique), `role` (`ADMIN`/`OPERATOR`) |
 | `conversation_notes` | Internal notes (never delivered) | `conversation_id`, `operator_id`, `text` |
-| `blocks` | Block records | `telegram_user_id` (unique), `created_by_telegram_user_id` |
-| `applications` | `/apply` requests; re-apply allowed after rejection | `telegram_user_id`, `status` (`pending`/`approved`/`rejected`), `decided_at` |
-| `processed_updates` | Idempotency claim ledger | `update_id` (unique), `claim_id` (per-claim nonce), `processed_at` |
+| `blocks` | Block records (**global**) | `telegram_user_id` (unique), `created_by_telegram_user_id` |
+| `applications` | `/apply` requests; re-apply allowed after rejection (**global**) | `telegram_user_id`, `status` (`pending`/`approved`/`rejected`), `decided_at` |
+| `processed_updates` | Idempotency claim ledger | `bot_id` + `update_id` (primary key — update ids are per-bot), `claim_id` (per-claim nonce), `processed_at` |
 | `settings` | Reserved key/value store | `key`, `value` |
 
 Key invariants:
 
 - `username` is **never** an identity key (Telegram usernames are mutable). Only `telegram_user_id` authorizes.
 - Conversations carry no `status`/`closed_at`; they are live from creation until explicitly deleted by an admin (`/delete`).
-- Messages are source-keyed `(chat_id, message_id)`, unique per source, so idempotency, replies, and edits resolve through the same key.
+- Messages are source-keyed `(bot_id, chat_id, message_id)`, unique per source, so idempotency, replies, and edits resolve through the same key. (Two bots each number their private-chat messages from 1, so `bot_id` is required to tell them apart; the non-unique `(chat_id, message_id)` index still resolves edits of group messages, whose ids are globally unique.)
 
 ## 5. Message model & mapping
 
@@ -103,6 +105,14 @@ Mapping rules:
 - **edits** — a user message edit is dropped (a forwarded topic copy cannot be edited); an edited operator reply edits the user-chat copy; unmappable edits are logged and dropped without resend.
 - **deletion** — message deletion is unobservable via the Bot API and is a documented platform limitation, not an error path.
 
+**Multi-bot routing (N bots, one support group).** The deployment runs N Telegram bots sharing **one** support group; the group control surface belongs to the **primary** bot (the first `BOTS` entry) alone:
+
+- **Per-(bot × user) accounting** — conversations, messages, the pending queue and **human verification** (`user_verifications`) are keyed by `bot_id`; `/apply` approval, purpose, language and block stay global. A user talking to two bots gets two independent topics, each named `botName | DisplayName | telegram_user_id` — and must pass the arithmetic gate **separately on each bot**; being verified on one bot never opens a topic on another.
+- **Group control surface = primary** — every bot in the group receives a copy of each group message via its own webhook; the non-primary copies are **claimed for dedup but ignored** (operator commands, topic delete/approve pickers, edited operator messages). Only the primary processes group commands, self-checks, and group-level pickers.
+- **User-side sends route through the topic's own bot** — the forward out of the user's chat with bot2, the operator-reply delivery into their chat, message edits, the info-card avatar fetch/post, and `/delete` copy retraction all use `registry.get(conversation.botId).client`. Group-side operations (topic create/hide/restore/edit/delete, pin, command menus) go through the **primary** client — any admin bot in the group can perform them.
+- **Webhook routes** — `POST /webhook` addresses the primary bot; `POST /webhook/<botId>` addresses a specific bot. The single `WEBHOOK_SECRET` authenticates every path; the path selects the bot, the header authenticates.
+- **Update dedup is per (bot, update)** — the same `update_id` on two bots claims independently and never dedupes each other; the pending/verification queue is keyed `pending:<botId>:<telegramUserId>` so two simultaneous challenges never overwrite each other.
+
 ## 6. Flows
 
 ### 6.1 User → operator
@@ -110,9 +120,9 @@ Mapping rules:
 1. An update arrives at `POST /webhook` and is parsed into an internal event.
 2. Rejection order (each creates **zero** database rows and is never relayed): bot sender → block check → **ad-text check** (§8) → rate-limit/spam/content checks → verification gate.
 3. A `/start` from an unverified user issues a four-choice arithmetic challenge; nothing is persisted.
-4. **Pending queue** — user messages that arrive while the verification/purpose gate still holds (a non-command text of an unverified user) are not lost: each is queued in the settings table under `pending:<telegram_user_id>` (JSON array of `{ messageId, contentType, replyToMessageId }`, deduped by message id, capped at 50 dropping the oldest; ad and rate/flood-limited messages were already rejected at earlier gates and never enqueued — so the flush needs no re-checks).
-5. A correct tap marks the user verified. The **first-contact purpose gate** then applies: a user who has stated a purpose before gets their conversation immediately; a first-time user is asked to state their purpose (来意) — the message answering that prompt **is** the purpose statement, is persisted, and opens the conversation with a **single pinned combined card** (purpose + user info) as the new topic's opening message; the purpose statement itself is not forwarded into the topic (commands re-prompt and never count). Once the conversation is open, the pending queue is **flushed in order** — each queued message is forwarded into the topic (topic-recovery aware) and recorded like any relay; a single failed entry is logged and skipped without aborting the rest.
-6. A verified/approved user with an open conversation: ensure user → ensure conversation (create topic if needed, which opens with a user-info card; a first-time contact already opened the topic with its single pinned purpose+info card) → restore a hidden topic before relaying → forward the message into the topic → record.
+4. **Pending queue** — user messages that arrive while the verification/purpose gate still holds (a non-command text of an unverified user) are not lost: each is queued in the settings table under `pending:<botId>:<telegram_user_id>` (JSON array of `{ messageId, contentType, replyToMessageId }`, deduped by message id, capped at 50 dropping the oldest; ad and rate/flood-limited messages were already rejected at earlier gates and never enqueued — so the flush needs no re-checks). The key is per **(bot, user)**, so the same user challenging on two bots never overwrites the other queue.
+5. A correct tap marks the user verified **on that bot only** (`user_verifications`). The **first-contact purpose gate** then applies: a user who has stated a purpose before gets their conversation immediately; a first-time user is asked to state their purpose (来意) — the message answering that prompt **is** the purpose statement, is persisted, and opens the conversation with a **single pinned combined card** (purpose + user info) as the new topic's opening message; the purpose statement itself is not forwarded into the topic (commands re-prompt and never count). Once the conversation is open, the pending queue is **flushed in order** — each queued message is forwarded into the topic (topic-recovery aware) and recorded like any relay; a single failed entry is logged and skipped without aborting the rest.
+6. A verified/approved user with an open conversation: ensure user → ensure the **(bot, user)** conversation (create that bot's topic if needed, which opens with a user-info card; a first-time contact already opened the topic with its single pinned purpose+info card) → restore a hidden topic before relaying → forward the message into the topic → record.
 
 ### 6.2 Operator → user
 
@@ -123,7 +133,7 @@ Mapping rules:
 ### 6.3 Human verification (`/start`)
 
 - An unverified user entering `/start` gets a single arithmetic expression of five random operators (`+ − × ÷`, no parentheses, integer-exact division, operands and intermediate results bounded to ±1000) with **four distinct integer choices**, exactly one correct.
-- A correct tap marks the user verified; a returning user (purpose already stated) gets the conversation (topic) immediately, while a first-time user is asked to state their purpose first (§6.1 / §6.6).
+- A correct tap marks the user verified **on that bot only** (`user_verifications` keyed (bot, user)); a returning user (purpose already stated) gets the conversation (topic) immediately, while a first-time user is asked to state their purpose first (§6.1 / §6.6). Passing on one bot never verifies the human on another — a user who messages a second bot is challenged afresh there.
 - A wrong tap consumes an attempt (default 3) and re-asks with reshuffled options; non-button content re-asks **without** consuming an attempt.
 - Exhausted or expired challenges reply to the user and create nothing; the next contact restarts the challenge.
 
@@ -144,7 +154,7 @@ Mapping rules:
 ### 6.6 Conversation deletion (`/delete`)
 
 - Admin `/delete` cascade-deletes the conversation's messages, notes, and row in one transaction; the topic is removed best-effort. Because the conversation row is gone, topic recovery never resurrects a `/delete`d conversation — auto-recovery only ever recreates topics that were deleted *manually*.
-- In that same transaction the user's access is **reset**: `verified_at`, `approved_at`, **and the stored purpose** (`purpose`, `purpose_at`) are cleared, so the next contact requires human verification again **and must state a fresh purpose** — which opens the new topic as its single pinned purpose+info card (§6.1) — before a new conversation is created.
+- In that same transaction the user's access is **reset**: the deleted conversation's **bot**'s `user_verifications` mark is cleared (`clearVerified`), `approved_at` and the stored purpose (`purpose`, `purpose_at`) are cleared, so the next contact **through that bot** requires human verification again **and must state a fresh purpose** — which opens the new topic as its single pinned purpose+info card (§6.1) — before a new conversation is created. The user's other bots' verification marks and topics are untouched.
 - The delivered user-chat copies (`OPERATOR_TO_USER` rows) are read before the cascade and each is deleted from the user's private chat best-effort afterwards, honoring the Telegram Bot API limit that only messages younger than 48 hours can be deleted; an expired (or already gone) copy is logged and dropped without failing. No welcome message is sent when a conversation opens, so these delivered copies are the only things to clean up on the user's side.
 - `/delete` is refused for the requester's **own** conversation, the **bot's**, or a **staff member's** (`ADMIN`/`OPERATOR`) conversation — every delete path (in-topic, direct `/delete <target>`, and the tap-to-delete picker) guards the target and replies/answers with `deleteStaffRefused` (`command_rejected`, `staff_target:*`) without any state change.
 - The **first pinned purpose+info opening card** (§6.1) is permanent: replying to it with `/delete` is refused for both operators and admins (`pinCardProtected`, log kind `pinned_card`) with no fall-through to the conversation delete; only deleting the conversation itself removes it.
@@ -181,13 +191,13 @@ All thresholds are config-driven, never hardcoded:
 - **Flood protection** — a burst past the flood threshold triggers a temporary restriction (no block record).
 - **Message length cap** and **media size cap** — rejected at ingestion.
 - **Block list** — blocked users are rejected at ingestion and cannot bypass block by re-`/start`.
-- **Ad-text detection (广告防护)** — detection runs on the hot path for text and media captions (a sticker has no text and never matches), with **allow-first** evaluation: allow keywords (`/ad allow` + `AD_ALLOW_KEYWORDS`) and allow patterns (`AD_ALLOW_PATTERNS`) are checked before anything else and clear the message on a hit; then the link-count rule (`AD_MAX_LINKS` / `/ad links` — counts `http(s)://` plus `t.me/…` and `telegram.me/…` handles); then the keyword blocklist (case-insensitive substring match); then the regex blocklist (tested against the whole text). The keyword blocklist merges the `AD_KEYWORDS` env words — a built-in default blacklist of 43 common spam words (`兼职,网赚,返利,返佣,刷单,刷赞,代购,垫付,日结,日赚,月入,躺赚,稳赚,赚钱,高佣金,宝妈,做任务,薅羊毛,加微信,加V,加QQ,引流,私聊,免费领取,领红包,抽奖,中奖,优惠券,赌博,博彩,菠菜,六合彩,彩票,开奖,出款,跑分,贷款,放款,炒股,荐股,投资,理财,虚拟币`) applies when the variable is unset and an explicitly empty variable contributes none; the whole list is overridable via `AD_KEYWORDS` and individual false positives via `AD_ALLOW_KEYWORDS` — with runtime keywords managed via `/ad`, persisted in the settings table, so a runtime change takes effect immediately. Regex patterns come only from `AD_PATTERNS`. **Only users who have not passed human verification are subject to the blacklist** — a verified/approved human is trusted and is never ad-blocked. On a hit by an unverified user the message is dropped (no rows created) and, when `AD_AUTO_BLOCK=true`, the sender is written to the block list (`created_by_telegram_user_id = 0` marks an auto-block). The hit is **quarantined** instead of announced in the general chat: the message is silently forwarded into a dedicated "🚮 Spam quarantine" topic (created lazily, id persisted in settings), and the notification (user, matched reason, excerpt, `/unban <id>` hint) is posted **inside that topic**. An admin replies to the quarantined copy with `/ad restore` to forward it back into the sender's topic, recorded as a USER_TO_OPERATOR relay; restoring never unblocks. Any quarantine failure falls back to a group-general-chat notification so an admin is never left blind. The check sits after the block check and before rate limiting, so a first-contact ad creates no user/conversation/topic row and is still reachable via group-level `/unban <@user|id>`. `AD_ENABLED=false` disables detection entirely; `AD_AUTO_BLOCK=false` drops + quarantines without blocking.
+- **Ad-text detection (广告防护)** — detection runs on the hot path for text and media captions (a sticker has no text and never matches), with **allow-first** evaluation: allow keywords (`/ad allow` + `AD_ALLOW_KEYWORDS`) and allow patterns (`AD_ALLOW_PATTERNS`) are checked before anything else and clear the message on a hit; then the link-count rule (`AD_MAX_LINKS` / `/ad links` — counts `http(s)://` plus `t.me/…` and `telegram.me/…` handles); then the keyword blocklist (case-insensitive substring match); then the regex blocklist (tested against the whole text). The keyword blocklist merges the `AD_KEYWORDS` env words — a built-in default blacklist of 43 common spam words (`兼职,网赚,返利,返佣,刷单,刷赞,代购,垫付,日结,日赚,月入,躺赚,稳赚,赚钱,高佣金,宝妈,做任务,薅羊毛,加微信,加V,加QQ,引流,私聊,免费领取,领红包,抽奖,中奖,优惠券,赌博,博彩,菠菜,六合彩,彩票,开奖,出款,跑分,贷款,放款,炒股,荐股,投资,理财,虚拟币`) applies when the variable is unset and an explicitly empty variable contributes none; the whole list is overridable via `AD_KEYWORDS` and individual false positives via `AD_ALLOW_KEYWORDS` — with runtime keywords managed via `/ad`, persisted in the settings table, so a runtime change takes effect immediately. Regex patterns come only from `AD_PATTERNS`. **Only users who have not passed human verification on the bot they are messaging are subject to the blacklist** — verification is per (bot, user), so a human verified on one bot is still ad-screened on another; a verified-on-this-bot or approved human is trusted and is never ad-blocked. On a hit by an unverified user the message is dropped (no rows created) and, when `AD_AUTO_BLOCK=true`, the sender is written to the block list (`created_by_telegram_user_id = 0` marks an auto-block). The hit is **quarantined** instead of announced in the general chat: the message is silently forwarded into a dedicated "🚮 Spam quarantine" topic (created lazily, id persisted in settings), and the notification (user, matched reason, excerpt, `/unban <id>` hint) is posted **inside that topic**. An admin replies to the quarantined copy with `/ad restore` to forward it back into the sender's topic, recorded as a USER_TO_OPERATOR relay; restoring never unblocks. Any quarantine failure falls back to a group-general-chat notification so an admin is never left blind. The check sits after the block check and before rate limiting, so a first-contact ad creates no user/conversation/topic row and is still reachable via group-level `/unban <@user|id>`. `AD_ENABLED=false` disables detection entirely; `AD_AUTO_BLOCK=false` drops + quarantines without blocking.
 
 The user-facing `/apply` and `/start` paths are also subject to the per-user rate limit.
 
 ## 9. Reliability
 
-- **Idempotency** — every `update_id` is claimed (ledger row with a per-claim nonce) before processing; a duplicate claim is a no-op. The unique `messages(chat_id, message_id)` index is the storage backstop.
+- **Idempotency** — every `(bot_id, update_id)` is claimed (ledger row with a per-claim nonce) before processing; a duplicate claim is a no-op. Update ids are **per-bot**, so the same update id arriving on two bots claims independently. The unique `messages(bot_id, chat_id, message_id)` index is the storage backstop.
 - **Telegram retries** — `429` honors `retry_after`; retryable failures (`429`, 5xx, network) get a bounded, exponential-backoff budget. `400`/`403`/`404` are never blind-retried, except the semantic recovery paths below.
 - **Topic recovery** — a send against a deleted topic recreates the topic, posts its user-info card, updates `conversation.telegram_topic_id`, and retries once; a send against a closed/hidden topic restores it in place and retries once. Recovery only runs while the conversation row still exists — `/delete` removes it, so deleted conversations are never resurrected.
 - **Per-conversation serialization** — the Docker path uses an in-process keyed mutex; the Cloudflare path relies on the Durable Object queue, which already serializes requests per instance.
@@ -198,11 +208,11 @@ The user-facing `/apply` and `/start` paths are also subject to the per-user rat
 
 Requirements: Docker with compose.
 
-1. `cp .env.example .env` at the repo root and configure `BOT_TOKEN`, `GROUP_ID`, `ADMIN_IDS`, `OPERATOR_IDS` (see §11).
+1. `cp .env.example .env` at the repo root and configure `BOTS`, `GROUP_ID`, `ADMIN_IDS`, `OPERATOR_IDS` (see §11).
 2. `docker compose -f src/docker/docker-compose.yml up -d` (from the repo root).
-3. The service listens on port `17575` (`POST /webhook`, `GET /health`).
+3. The service listens on port `17575` (`POST /webhook` and `/webhook/<botId>`, `GET /health`).
 4. The SQLite database lives at `/app/data/relaytg.db` on the mounted `data/` volume at the repo root — container restarts keep all data.
-5. Put a public HTTPS endpoint in front (reverse proxy, tunnel) and configure the Telegram webhook once (§12).
+5. Put a public HTTPS endpoint in front (reverse proxy, tunnel) and configure the Telegram webhooks once (§12).
 
 ### 10.2 Cloudflare Workers Free
 
@@ -211,15 +221,15 @@ Requirements: Node 22+, a Cloudflare account, `wrangler`.
 1. `pnpm install`.
 2. Set secrets (never in `wrangler.jsonc` or git):
    ```bash
-   npx wrangler secret put BOT_TOKEN
+   npx wrangler secret put BOTS
    npx wrangler secret put ADMIN_IDS
    npx wrangler secret put OPERATOR_IDS
    ```
 3. Set `GROUP_ID` in `src/apps/worker/wrangler.jsonc` `vars` (a group id is not a credential).
 4. `npx wrangler deploy` — first deploy registers the `ConversationDO` Durable Object with SQLite-backed storage (`new_sqlite_classes`). No paid Cloudflare products, no external database, no third-party services are required.
-5. Configure the Telegram webhook once (§12) at `https://<worker>.workers.dev/webhook`.
+5. Configure the Telegram webhooks once (§12) at `https://<worker>.workers.dev/webhook` and `/webhook/<botId>`.
 
-Local development: `npx wrangler dev --var BOT_TOKEN:... --var GROUP_ID:...` (shell env vars are not injected as Worker bindings).
+Local development: `npx wrangler dev --var BOTS:main:... --var GROUP_ID:...` (shell env vars are not injected as Worker bindings).
 
 ### 10.3 Health
 
@@ -231,7 +241,7 @@ Docker: environment variables via `.env`. Cloudflare: Worker **secrets** for cre
 
 | Variable | Default | Secret | Purpose |
 | --- | --- | --- | --- |
-| `BOT_TOKEN` | — (required) | ✓ | Telegram Bot API token |
+| `BOTS` | — (required) | ✓ | Comma-separated `name:token` pairs; the FIRST is the primary bot (owns the group control surface). The token itself contains `:`, so each name is everything before the first colon of its entry, validating `[A-Za-z0-9_-]`. The name becomes the topic-name prefix (`bot名 | 用户名 | ID`). |
 | `GROUP_ID` | — (required) | | Numeric id of the Forum support group |
 | `ADMIN_IDS` | — | ✓ | Comma-separated numeric admin `telegram_user_id`s |
 | `OPERATOR_IDS` | — | ✓ | Comma-separated numeric operator `telegram_user_id`s |
@@ -259,29 +269,38 @@ Docker: environment variables via `.env`. Cloudflare: Worker **secrets** for cre
 
 ## 12. One-time out-of-band webhook configuration
 
-RelayTG exposes **`POST /webhook`** on both runtimes and **does not** manage `setWebhook`/`deleteWebhook`/`getWebhookInfo` — configuring the Telegram side is a documented one-time deployment step.
+RelayTG exposes **`POST /webhook`** (= the primary bot) and **`POST /webhook/<botId>`** (one route per additional bot) on both runtimes and **does not** manage `setWebhook`/`deleteWebhook`/`getWebhookInfo` — configuring the Telegram side is a documented one-time deployment step. The path selects which bot an update belongs to; the single `WEBHOOK_SECRET` guards every route.
 
-Your deployment must be reachable at a **public HTTPS URL** that forwards to `POST /webhook`:
+Your deployment must be reachable at a **public HTTPS URL** that forwards to the webhook paths:
 
-- Docker: `https://your-host.example/webhook` (reverse proxy / tunnel → `http://<container>:17575`).
-- Cloudflare: `https://relaytg.<subdomain>.workers.dev/webhook`.
+- Docker: `https://your-host.example/webhook[/<botId>]` (reverse proxy / tunnel → `http://<container>:17575`).
+- Cloudflare: `https://relaytg.<subdomain>.workers.dev/webhook[/<botId>]`.
 
-Configure Telegram once (replace `<BOT_TOKEN>` and the URL):
+Configure every bot once (replace `<TOKEN>` for that bot, `<BOT_ID>` = its `BOTS` name, and the URL). The **primary** bot registers at `/webhook`:
 
 ```bash
 curl -F "url=https://YOUR-PUBLIC-HOST/webhook" \
-  "https://api.telegram.org/bot<BOT_TOKEN>/setWebhook"
+  -F "secret_token=$WEBHOOK_SECRET" \
+  "https://api.telegram.org/bot<TOKEN>/setWebhook"
 ```
 
-Verify:
+Every **additional** bot registers at `/webhook/<botId>`, sharing the same `$WEBHOOK_SECRET`:
 
 ```bash
-curl "https://api.telegram.org/bot<BOT_TOKEN>/getWebhookInfo"
+curl -F "url=https://YOUR-PUBLIC-HOST/webhook/<BOT_ID>" \
+  -F "secret_token=$WEBHOOK_SECRET" \
+  "https://api.telegram.org/bot<TOKEN>/setWebhook"
+```
+
+Verify each bot:
+
+```bash
+curl "https://api.telegram.org/bot<TOKEN>/getWebhookInfo"
 ```
 
 ## 13. Security
 
-- `BOT_TOKEN` and other secrets **must never** be committed to git, written to logs, stored in the database, baked into a Docker image, or shipped to clients. They arrive only via environment variables / Worker secrets at startup.
+- `BOTS` and other secrets **must never** be committed to git, written to logs, stored in the database, baked into a Docker image, or shipped to clients. They arrive only via environment variables / Worker secrets at startup.
 - `.env`, `.env.*`, `data/`, `.wrangler/`, and `.dev.vars` are gitignored.
 - The structured logger emits a fixed event catalog (timestamp, level, component, event, `conversation_id`/`telegram_user_id`) and is constructed so a value passed as a body can never be interpolated into output.
 - Authorization is exclusively by `telegram_user_id`; usernames are display-only.

@@ -159,7 +159,11 @@ export class AdCommands extends CommandBase {
       });
       user = result.user;
     }
-    const conversation = await this.deps.conversations.grantAccess(user);
+    // The quarantined user contacted a specific bot (recorded when the message
+    // was quarantined); their conversation must open with that bot — only it can
+    // forward their original from their private chat.
+    const bot = this.bots.get(entry.botId);
+    const conversation = await this.deps.conversations.grantAccess(user, bot);
     await this.deps.quarantine.restore(entry, conversation);
     await this.send(event, t.adRestoreDone);
   }

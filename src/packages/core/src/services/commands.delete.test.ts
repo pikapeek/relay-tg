@@ -40,7 +40,7 @@ describe("/delete (8.4)", () => {
     // cleared so the next contact re-verifies, and the purpose is cleared too so
     // the next conversation opens with a freshly stated, pinned purpose.
     const after = await h.db.users.getByTelegramUserId(42);
-    expect(after?.verifiedAt).toBeNull();
+    expect(await h.db.users.getVerifiedAt("main", 42)).toBeNull();
     expect(after?.approvedAt).toBeNull();
     expect(after?.purpose).toBeNull();
   });
@@ -150,20 +150,23 @@ describe("/delete (8.4)", () => {
 
   it("refuses to /delete the bot's own conversation", async () => {
     const h = makeHarness();
-    h.ctx.botTelegramUserId = 4242;
     const services = await seeded(h);
-    const botConv = await verifiedUser(h, 4242);
+    // The PRIMARY bot's own telegram user id (the fake's default getMe id) — a
+    // conversation whose user IS the bot is as untouchable as the requester's
+    // or a staff member's.
+    const botUserId = h.bots.primary().botTelegramUserId;
+    const botConv = await verifiedUser(h, botUserId);
 
     // In its topic and by direct group-level target, the bot's own thread is
     // as untouchable as the requester's or a staff member's.
     await services.processor.process(1, operatorMessage(GROUP_ID, 1, profile(111), text("/delete"), botConv.telegramTopicId!));
-    await services.processor.process(2, operatorMessage(GROUP_ID, 2, profile(111), text("/delete 4242"), null));
+    await services.processor.process(2, operatorMessage(GROUP_ID, 2, profile(111), text(`/delete ${botUserId}`), null));
     expect(replyText(h)).toEqual([
       OPERATOR_TEXTS("en").deleteStaffRefused,
       OPERATOR_TEXTS("en").deleteStaffRefused,
     ]);
 
-    expect(await h.db.conversations.getByTelegramUserId(4242)).not.toBeNull();
+    expect(await h.db.conversations.getByTelegramUserId(botUserId)).not.toBeNull();
     expect(h.telegram.callsOf("deleteForumTopic")).toHaveLength(0);
   });
 });
@@ -252,7 +255,7 @@ describe("/delete reply-retract (8.4d)", () => {
     // Drive the purpose gate so the topic opens with a SINGLE PINNED purpose+info
     // card (unlike `verifiedUser`, whose info card is unpinned).
     await services.processor.process(1, userMessage(42, 100, profile(42), text("/start")));
-    const state = (await h.store.get(42))!;
+    const state = (await h.store.get("main", 42))!;
     await services.processor.process(2, verificationAnswer(42, state.questionMessageId!, state.answer, "cq", profile(42)));
     await services.processor.process(3, userMessage(42, 101, profile(42), text("asking about refunds")));
 

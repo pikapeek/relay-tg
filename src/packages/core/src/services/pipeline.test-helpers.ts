@@ -8,10 +8,13 @@ import { loadConfig, type ConversationRecord, type MessageContent, type Config }
 import { buildServices } from "./index.ts";
 import { profile, type Harness } from "./harness.ts";
 
-export async function verifiedUser(h: Harness, telegramUserId: number, purpose = "test purpose"): Promise<void> {
+export async function verifiedUser(h: Harness, telegramUserId: number, purpose = "test purpose", botId?: string): Promise<void> {
   const services = buildServices(h.ctx);
+  const bot = botId ? h.bots.get(botId) : h.bots.primary();
   const { user } = await services.users.getOrCreate(profile(telegramUserId));
-  await services.users.markVerified(user.telegramUserId);
+  // Verification is per (bot, user): the fixture verifies the user on the
+  // given bot (primary by default) only.
+  await services.users.markVerified(user.telegramUserId, bot);
   // Verification is followed by the first-contact purpose gate: the user states
   // a purpose before any topic exists, so fixtures carry one on the record.
   await services.users.setPurpose(user.telegramUserId, purpose);
@@ -21,7 +24,7 @@ export async function verifiedUser(h: Harness, telegramUserId: number, purpose =
 export async function openConversation(h: Harness, telegramUserId: number): Promise<ConversationRecord> {
   const services = buildServices(h.ctx);
   const user = (await services.users.getByTelegramUserId(telegramUserId))!;
-  return services.conversations.grantAccess(user);
+  return services.conversations.grantAccess(user, h.bots.primary());
 }
 
 export function topicSends(h: Harness, topicId: number, method = "sendMessage") {
@@ -76,7 +79,7 @@ export async function drainMicrotasks(): Promise<void> {
 /** Shared ad-config builder for the 广告防护 suites (ad + pending). */
 export function adConfig(env: Record<string, string> = {}): Config {
   return loadConfig({
-    BOT_TOKEN: "test-token",
+    BOTS: "main:test-token",
     GROUP_ID: "-100123456789",
     ADMIN_IDS: "111",
     OPERATOR_IDS: "222,333",

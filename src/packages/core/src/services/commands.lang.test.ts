@@ -53,7 +53,7 @@ describe("/lang (9)", () => {
     const services = buildServices(h.ctx);
     await services.processor.process(1, userMessage(42, 100, profile(42, { languageCode: "en" }), text("/lang zh")));
     await services.processor.process(2, userMessage(42, 101, profile(42, { languageCode: "en" }), text("/start")));
-    const state = (await h.store.get(42))!;
+    const state = (await h.store.get("main", 42))!;
     const ok = await services.processor.process(
       3,
       verificationAnswer(42, state.questionMessageId!, state.answer, "cq-ok", profile(42, { languageCode: "en" })),

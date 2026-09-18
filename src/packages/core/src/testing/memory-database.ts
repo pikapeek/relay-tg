@@ -37,7 +37,13 @@ import {
 
 class MemoryUsers implements UserRepository {
   rows = new Map<number, UserRecord>();
+  /** Per-(bot × user) verification rows, mirroring `user_verifications`. */
+  private verified = new Map<string, string>(); // `${botId}:${userId}` → ISO timestamp
   private seq = 0;
+
+  private verifiedKey(botId: string, telegramUserId: number): string {
+    return `${botId}:${telegramUserId}`;
+  }
 
   async getByTelegramUserId(id: number): Promise<UserRecord | null> {
     return this.rows.get(id) ?? null;
@@ -73,7 +79,6 @@ class MemoryUsers implements UserRepository {
       languageCode: input.languageCode,
       preferredLanguage: null,
       isBot: input.isBot,
-      verifiedAt: null,
       approvedAt: null,
       purpose: null,
       purposeAt: null,
@@ -96,12 +101,18 @@ class MemoryUsers implements UserRepository {
     return [...this.rows.values()].filter((u) => u.preferredLanguage != null);
   }
 
-  async setVerifiedAt(id: number, at: Date): Promise<void> {
-    const row = this.rows.get(id);
-    if (row) {
-      row.verifiedAt = at.toISOString();
-      row.updatedAt = at.toISOString();
-    }
+  async getVerifiedAt(botId: string, telegramUserId: number): Promise<string | null> {
+    return this.verified.get(this.verifiedKey(botId, telegramUserId)) ?? null;
+  }
+
+  async setVerifiedAt(botId: string, telegramUserId: number, at: Date): Promise<void> {
+    // Deliberately does NOT bump users.updatedAt — matches the sqlite repo,
+    // which keeps the per-(bot, user) mark out of the global user row.
+    this.verified.set(this.verifiedKey(botId, telegramUserId), at.toISOString());
+  }
+
+  async clearVerified(botId: string, telegramUserId: number): Promise<void> {
+    this.verified.delete(this.verifiedKey(botId, telegramUserId));
   }
 
   async setApprovedAt(id: number, at: Date): Promise<void> {
@@ -124,7 +135,6 @@ class MemoryUsers implements UserRepository {
   async resetAccess(id: number): Promise<void> {
     const row = this.rows.get(id);
     if (row) {
-      row.verifiedAt = null;
       row.approvedAt = null;
       // Clearing the purpose re-engages the purpose gate: the next conversation
       // opens with a freshly stated purpose on its single pinned purpose+info card.
@@ -137,7 +147,7 @@ class MemoryUsers implements UserRepository {
 
 class MemoryConversations implements ConversationRepository {
   rows = new Map<string, ConversationRecord>();
-  private byUser = new Map<number, string>();
+  private byBotUser = new Map<string, string>(); // `${botId}:${userId}` → id
   private byTopic = new Map<number, string>();
   private seq = 0;
 
@@ -145,8 +155,19 @@ class MemoryConversations implements ConversationRepository {
     return this.rows.get(id) ?? null;
   }
 
+  /** The user's most recent conversation across all bots (multi-bot fallback;
+   *  exact (bot, user) lookup is getByBotAndUser). */
   async getByTelegramUserId(telegramUserId: number): Promise<ConversationRecord | null> {
-    const id = this.byUser.get(telegramUserId);
+    let best: ConversationRecord | null = null;
+    for (const row of this.rows.values()) {
+      if (row.telegramUserId !== telegramUserId) continue;
+      if (best == null || row.lastActivityAt > best.lastActivityAt) best = row;
+    }
+    return best;
+  }
+
+  async getByBotAndUser(botId: string, telegramUserId: number): Promise<ConversationRecord | null> {
+    const id = this.byBotUser.get(`${botId}:${telegramUserId}`);
     return id ? (this.rows.get(id) ?? null) : null;
   }
 
@@ -158,6 +179,7 @@ class MemoryConversations implements ConversationRepository {
   async create(input: ConversationCreateInput, now: Date): Promise<ConversationRecord> {
     const row: ConversationRecord = {
       id: `c-${++this.seq}`,
+      botId: input.botId,
       telegramUserId: input.telegramUserId,
       telegramTopicId: input.telegramTopicId,
       assignedOperatorId: input.assignedOperatorId,
@@ -167,7 +189,7 @@ class MemoryConversations implements ConversationRepository {
       createdAt: now.toISOString(),
     };
     this.rows.set(row.id, row);
-    this.byUser.set(row.telegramUserId, row.id);
+    this.byBotUser.set(`${row.botId}:${row.telegramUserId}`, row.id);
     if (row.telegramTopicId != null) this.byTopic.set(row.telegramTopicId, row.id);
     return row;
   }
@@ -223,7 +245,7 @@ class MemoryConversations implements ConversationRepository {
     const row = this.rows.get(id);
     if (!row) return;
     this.rows.delete(id);
-    this.byUser.delete(row.telegramUserId);
+    this.byBotUser.delete(`${row.botId}:${row.telegramUserId}`);
     if (row.telegramTopicId != null) this.byTopic.delete(row.telegramTopicId);
   }
 }
@@ -237,6 +259,7 @@ class MemoryMessages implements MessageRepository {
     const row: MessageRecord = {
       id: `m-${++this.seq}`,
       conversationId: input.conversationId,
+      botId: input.botId,
       telegramChatId: input.telegramChatId,
       telegramMessageId: input.telegramMessageId,
       telegramTopicId: input.telegramTopicId,
@@ -248,7 +271,12 @@ class MemoryMessages implements MessageRepository {
       createdAt: now.toISOString(),
     };
     this.rows.set(row.id, row);
-    this.bySource.set(`${row.telegramChatId}:${row.telegramMessageId}`, row.id);
+    // Source lookup is (chat_id, message_id) — a user's private chat id is the
+    // same number across bots and message ids restart at 1 per bot, so the same
+    // (chat, message) can legitimately exist once per bot. Mirror SQLite's
+    // `.get()` (earliest row wins): keep the FIRST mapping.
+    const key = `${row.telegramChatId}:${row.telegramMessageId}`;
+    if (!this.bySource.has(key)) this.bySource.set(key, row.id);
     return row;
   }
 
@@ -293,7 +321,10 @@ class MemoryMessages implements MessageRepository {
     for (const [key, row] of this.rows) {
       if (row.conversationId === conversationId) {
         this.rows.delete(key);
-        this.bySource.delete(`${row.telegramChatId}:${row.telegramMessageId}`);
+        // Only drop the source mapping when it points at this row — the same
+        // (chat, message) may be owned by a different bot's conversation.
+        const src = `${row.telegramChatId}:${row.telegramMessageId}`;
+        if (this.bySource.get(src) === key) this.bySource.delete(src);
       }
     }
   }
@@ -437,11 +468,12 @@ class MemoryApplications implements ApplicationRepository {
 }
 
 class MemoryProcessedUpdates implements ProcessedUpdatesRepository {
-  private claimed = new Set<number>();
+  private claimed = new Set<string>();
 
-  async claim(updateId: number, now: Date): Promise<boolean> {
-    if (this.claimed.has(updateId)) return false;
-    this.claimed.add(updateId);
+  async claim(botId: string, updateId: number, now: Date): Promise<boolean> {
+    const key = `${botId}:${updateId}`;
+    if (this.claimed.has(key)) return false;
+    this.claimed.add(key);
     void now;
     return true;
   }

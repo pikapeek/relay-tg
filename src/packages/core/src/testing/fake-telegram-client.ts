@@ -35,6 +35,15 @@ const THREAD_SEND_METHODS = new Set([
  *  edits need a caption-carrying message (photo/video/document/audio/voice). */
 type CopyShape = "text" | "photo" | "video" | "document" | "audio" | "voice" | "sticker";
 
+/** Shared forum-topic state for ONE deployment. Every bot of a deployment lives
+ *  in the same support group, so a topic created by the primary bot is a real
+ *  group topic that the other bots can also send into; the fake models that by
+ *  letting several FakeTelegramClient instances share one store. */
+export interface FakeTopicStore {
+  topics: Map<number, { name: string; closed: boolean }>;
+  nextTopicId: number;
+}
+
 const SEND_SHAPE: Record<string, CopyShape | undefined> = {
   sendMessage: "text",
   sendPhoto: "photo",
@@ -58,7 +67,10 @@ export interface RecordedCall {
 
 export class FakeTelegramClient implements TelegramClient {
   calls: RecordedCall[] = [];
-  topics = new Map<number, { name: string; closed: boolean }>();
+  /** The deployment's shared forum-topic state (see FakeTopicStore). When no
+   *  store is injected a private one is created, so a standalone fake behaves
+   *  exactly as before. */
+  topics: Map<number, { name: string; closed: boolean }>;
   answers: Array<{ callbackQueryId: string; text?: string; showAlert?: boolean }> = [];
   /** Registered command menus, in call order. */
   commandMenus: Array<{ scope?: BotCommandScope; commands: BotCommand[]; languageCode?: string }> = [];
@@ -90,12 +102,17 @@ export class FakeTelegramClient implements TelegramClient {
   /** Shape of each delivered copy, keyed by the message id the fake returned. */
   private readonly copyShape = new Map<number, CopyShape>();
   private nextMessageId = 1000;
-  private nextTopicId = 100;
+  private readonly topicStore: FakeTopicStore;
   private failOnce: { method?: string; kind: TelegramErrorKind } | null = null;
   private failAlways: { method?: string; kind: TelegramErrorKind } | null = null;
   /** Fail the n-th matching call (1-based), then clear. */
   private failNth: { n: number; method?: string; kind: TelegramErrorKind } | null = null;
   private failCounts: Record<string, number> = {};
+
+  constructor(topicStore?: FakeTopicStore) {
+    this.topicStore = topicStore ?? { topics: new Map(), nextTopicId: 100 };
+    this.topics = this.topicStore.topics;
+  }
 
   failOnceWith(kind: TelegramErrorKind, method?: string): void {
     this.failOnce = { kind, method };
@@ -254,7 +271,7 @@ export class FakeTelegramClient implements TelegramClient {
 
   async createForumTopic(p: { chatId: number; name: string }): Promise<number> {
     this.checkFail("createForumTopic");
-    const topicId = this.nextTopicId++;
+    const topicId = this.topicStore.nextTopicId++;
     this.calls.push({ method: "createForumTopic", target: { chatId: p.chatId }, payload: { name: p.name } });
     this.topics.set(topicId, { name: p.name, closed: false });
     return topicId;
@@ -376,7 +393,7 @@ export class FakeTelegramClient implements TelegramClient {
 
   /** Create the topic that a fresh conversation would have created. */
   seedTopic(): number {
-    const id = this.nextTopicId++;
+    const id = this.topicStore.nextTopicId++;
     this.topics.set(id, { name: "seed", closed: false });
     return id;
   }

@@ -16,6 +16,8 @@ import { FakeDoSqlHandle } from "./fake-do-sql.ts";
 import initialSql from "../../../migrations/001_initial.sql?raw";
 import preferredLanguageSql from "../../../migrations/002_preferred_language.sql?raw";
 import purposeSql from "../../../migrations/003_purpose.sql?raw";
+import multiBotSql from "../../../migrations/004_multi_bot.sql?raw";
+import perBotVerificationSql from "../../../migrations/005_per_bot_verification.sql?raw";
 
 relaySuite(
   "cloudflare-do (fake sql handle)",
@@ -24,5 +26,7 @@ relaySuite(
     { version: "001_initial", sql: initialSql },
     { version: "002_preferred_language", sql: preferredLanguageSql },
     { version: "003_purpose", sql: purposeSql },
+    { version: "004_multi_bot", sql: multiBotSql },
+    { version: "005_per_bot_verification", sql: perBotVerificationSql },
   ],
 );

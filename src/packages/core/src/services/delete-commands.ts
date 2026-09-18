@@ -14,6 +14,7 @@ import {
 } from "@relaytg/shared";
 import { TOPIC_PIN_KEY } from "../ports.ts";
 import type { ServiceContext } from "./service-context.ts";
+import type { BotInfo } from "./bot-registry.ts";
 import type { InlineKeyboard, InlineKeyboardButton } from "../telegram-types.ts";
 import { OPERATOR_TEXTS, type OperatorTexts } from "./texts.ts";
 import { CommandBase, type CommandsDeps } from "./command-base.ts";
@@ -113,7 +114,12 @@ export class DeleteCommands extends CommandBase {
     // operator sees exactly which message was retracted.
     let ok = true;
     try {
-      await this.telegram.deleteMessage({ chatId: conversation.telegramUserId, messageId: record.relayedMessageId! });
+      // The copy was delivered by the conversation's bot — only that bot can
+      // retract it from the user's private chat.
+      await this.bots.get(conversation.botId).client.deleteMessage({
+        chatId: conversation.telegramUserId,
+        messageId: record.relayedMessageId!,
+      });
     } catch (err) {
       ok = false;
       this.logger.warn("del_user_chat_failed", {
@@ -166,12 +172,13 @@ export class DeleteCommands extends CommandBase {
 
   /** /list — plain-text list of every conversation, numbered, each ending with
    *  its conversation id so `/delete <id>` (or @user / telegram_user_id) targets
-   *  it directly. Works at group level and in a staff member's private chat. */
-  async listAll(sender: UserProfile, chatId: number): Promise<void> {
+   *  it directly. Works at group level (PRIMARY reply) and in a staff member's
+   *  private chat with any bot (`bot` picks the replying client). */
+  async listAll(sender: UserProfile, chatId: number, bot?: BotInfo): Promise<void> {
     const t = OPERATOR_TEXTS(await this.deps.users.effectiveLanguageOf(sender));
     const conversations = await this.db.conversations.list();
     if (conversations.length === 0) {
-      await this.sendTo(chatId, undefined, t.listEmpty);
+      await this.sendTo(chatId, undefined, t.listEmpty, bot);
       this.logger.info("command_executed", { telegramUserId: sender.telegramUserId, status: "/list" });
       return;
     }
@@ -183,16 +190,16 @@ export class DeleteCommands extends CommandBase {
       lines.push(t.listItem(i + 1, t.conversationLabel(name, user?.username ?? null, c.id)));
     }
     const text = [t.listHeader(conversations.length), "", ...lines].join("\n");
-    await this.sendTo(chatId, undefined, text);
+    await this.sendTo(chatId, undefined, text, bot);
     this.logger.info("command_executed", { telegramUserId: sender.telegramUserId, status: "/list" });
   }
 
   /** /delete at group level / private chat (admin only): with a target argument
    *  delete that conversation directly; otherwise post the tap-to-delete list. */
-  async deleteFromList(sender: UserProfile, chatId: number, args: string[]): Promise<void> {
+  async deleteFromList(sender: UserProfile, chatId: number, args: string[], bot?: BotInfo): Promise<void> {
     const t = OPERATOR_TEXTS(await this.deps.users.effectiveLanguageOf(sender));
     if (!(await this.deps.operators.isAdmin(sender.telegramUserId))) {
-      await this.sendTo(chatId, undefined, t.adminOnly);
+      await this.sendTo(chatId, undefined, t.adminOnly, bot);
       this.logger.info("command_rejected", { telegramUserId: sender.telegramUserId, status: "admin_only:/delete" });
       return;
     }
@@ -200,11 +207,11 @@ export class DeleteCommands extends CommandBase {
     if (target) {
       const conversation = await this.resolveConversationTarget(target);
       if (!conversation) {
-        await this.sendTo(chatId, undefined, t.unknownRestoreTarget);
+        await this.sendTo(chatId, undefined, t.unknownRestoreTarget, bot);
         return;
       }
       if (await this.isProtectedDeleteTarget(sender.telegramUserId, conversation)) {
-        await this.sendTo(chatId, undefined, t.deleteStaffRefused);
+        await this.sendTo(chatId, undefined, t.deleteStaffRefused, bot);
         this.logger.info("command_rejected", {
           telegramUserId: sender.telegramUserId,
           status: "staff_target:/delete",
@@ -220,35 +227,38 @@ export class DeleteCommands extends CommandBase {
         chatId,
         undefined,
         t.conversationDeleted(name, user?.username ?? null, conversation.telegramUserId, conversation.id),
+        bot,
       );
       this.logger.info("command_executed", { telegramUserId: sender.telegramUserId, status: "/delete", mode: "direct", conversationId: conversation.id });
       return;
     }
-    await this.deletePicker(sender, chatId);
+    await this.deletePicker(sender, chatId, bot);
   }
 
   /** The tap-to-delete picker: one single-column button per conversation, each
    *  carrying `del:<conversation_id>`. Posting it into a private chat or the
    *  group's general chat gives admins a one-tap delete surface. */
-  async deletePicker(sender: UserProfile, chatId: number): Promise<void> {
+  async deletePicker(sender: UserProfile, chatId: number, bot?: BotInfo): Promise<void> {
     const t = OPERATOR_TEXTS(await this.deps.users.effectiveLanguageOf(sender));
     const conversations = await this.db.conversations.list();
     if (conversations.length === 0) {
-      await this.sendTo(chatId, undefined, t.listEmpty);
+      await this.sendTo(chatId, undefined, t.listEmpty, bot);
       return;
     }
     const markup = await this.pickerMarkup(conversations, t);
-    await this.telegram.sendMessage({ chatId, text: t.deletePickerHeader(conversations.length), replyMarkup: markup });
+    await this.clientFor(bot).sendMessage({ chatId, text: t.deletePickerHeader(conversations.length), replyMarkup: markup });
     this.logger.info("command_executed", { telegramUserId: sender.telegramUserId, status: "/delete", mode: "picker" });
   }
 
   /** Callback tap on a `del:<conversation_id>` button (admin only): delete the
    *  conversation (and its topic), toast the result, then re-render the picker
-   *  so the removed row disappears. */
-  async handleDeleteTap(event: ConversationDeleteEvent): Promise<void> {
+   *  so the removed row disappears. `bot` is the bot the tap came through — for
+   *  a group picker that is the PRIMARY bot (the group gate ignores the others);
+   *  for a private-chat picker it is the bot the picker lives in. */
+  async handleDeleteTap(event: ConversationDeleteEvent, bot?: BotInfo): Promise<void> {
     const t = OPERATOR_TEXTS(await this.deps.users.effectiveLanguageOf(event.sender));
     if (!(await this.deps.operators.isAdmin(event.sender.telegramUserId))) {
-      await this.telegram.answerCallbackQuery({ callbackQueryId: event.callbackQueryId, text: t.adminOnly, showAlert: true });
+      await this.clientFor(bot).answerCallbackQuery({ callbackQueryId: event.callbackQueryId, text: t.adminOnly, showAlert: true });
       this.logger.info("command_rejected", { telegramUserId: event.sender.telegramUserId, status: "admin_only:delete_tap" });
       return;
     }
@@ -256,14 +266,14 @@ export class DeleteCommands extends CommandBase {
     if (!conversation) {
       // Already gone — e.g. deleted from another picker or via a direct /delete.
       // Toast and refresh the picker so the stale row disappears.
-      await this.telegram.answerCallbackQuery({ callbackQueryId: event.callbackQueryId, text: t.deleteGone, showAlert: false });
-      await this.rerenderPicker(event.chatId, event.messageId, t);
+      await this.clientFor(bot).answerCallbackQuery({ callbackQueryId: event.callbackQueryId, text: t.deleteGone, showAlert: false });
+      await this.rerenderPicker(event.chatId, event.messageId, t, bot);
       return;
     }
     if (await this.isProtectedDeleteTarget(event.sender.telegramUserId, conversation)) {
       // A tap can't remove the requester's own conversation or a staff member's
       // — alert instead of deleting; the picker (unchanged) stays on screen.
-      await this.telegram.answerCallbackQuery({
+      await this.clientFor(bot).answerCallbackQuery({
         callbackQueryId: event.callbackQueryId,
         text: t.deleteStaffRefused,
         showAlert: true,
@@ -278,12 +288,12 @@ export class DeleteCommands extends CommandBase {
     const user = await this.deps.users.getByTelegramUserId(conversation.telegramUserId);
     const name = user?.firstName ?? String(conversation.telegramUserId);
     await this.deps.conversations.deleteConversation(conversation);
-    await this.telegram.answerCallbackQuery({
+    await this.clientFor(bot).answerCallbackQuery({
       callbackQueryId: event.callbackQueryId,
       text: t.deletedToast(name, user?.username ?? null, conversation.telegramUserId),
       showAlert: false,
     });
-    await this.rerenderPicker(event.chatId, event.messageId, t);
+    await this.rerenderPicker(event.chatId, event.messageId, t, bot);
     this.logger.info("command_executed", {
       telegramUserId: event.sender.telegramUserId,
       status: "/delete",
@@ -295,14 +305,14 @@ export class DeleteCommands extends CommandBase {
   /** Re-render a picker message after a delete: with conversations left, the
    *  header count and button set are rebuilt; with none, the buttons are dropped
    *  and the empty text replaces the picker. */
-  async rerenderPicker(chatId: number, messageId: number, t: OperatorTexts): Promise<void> {
+  async rerenderPicker(chatId: number, messageId: number, t: OperatorTexts, bot?: BotInfo): Promise<void> {
     const conversations = await this.db.conversations.list();
     if (conversations.length === 0) {
-      await this.telegram.editMessageText({ chatId, messageId, text: t.listEmpty }).catch(() => {});
+      await this.clientFor(bot).editMessageText({ chatId, messageId, text: t.listEmpty }).catch(() => {});
       return;
     }
     const markup = await this.pickerMarkup(conversations, t);
-    await this.telegram
+    await this.clientFor(bot)
       .editMessageText({ chatId, messageId, text: t.deletePickerHeader(conversations.length), replyMarkup: markup })
       .catch(() => {});
   }

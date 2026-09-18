@@ -18,6 +18,8 @@ import {
   WallClockRuntime,
   bootServices,
   immediateSerializer,
+  type BotEntry,
+  type BotRegistry,
   type CoreServices,
 } from "@relaytg/core";
 import type { Database, Runtime, Serializer, TelegramClient, VerificationStore } from "@relaytg/core";
@@ -35,20 +37,26 @@ export interface RelayDeps {
   /** Worker environment (config keys only; CONVERSATION binding stripped). */
   env: EnvSource;
   logger?: Logger;
+  /** The PRIMARY bot's client override (config.bots[0]) for tests. */
   telegram?: TelegramClient;
+  /** Additional (non-primary) bot clients for tests; covers the remaining
+   *  `config.bots` entries. Defaults to one real client per bot. */
+  bots?: BotEntry[];
   runtime?: Runtime;
   serializer?: Serializer;
   verificationStore?: VerificationStore;
 }
 
 /** The dependency subset the runtime (or a test) may override. */
-export type RelayOverrides = Pick<RelayDeps, "logger" | "telegram" | "runtime" | "serializer" | "verificationStore">;
+export type RelayOverrides = Pick<RelayDeps, "logger" | "telegram" | "bots" | "runtime" | "serializer" | "verificationStore">;
 
 export interface Relay {
   config: Config;
   logger: Logger;
   db: Database;
   services: CoreServices;
+  /** Every configured bot, indexed by botId (`primary()` = `config.bots[0]`). */
+  bots: BotRegistry;
   /** Run one hide sweep against the given reference time (default: now). */
   sweepHidden(now?: Date): Promise<number>;
 }
@@ -63,18 +71,33 @@ export async function buildRelay(deps: RelayDeps): Promise<Relay> {
   if (applied.length > 0) logger.info("system_start", { status: `migrations:${applied.join(",")}` });
   const db = new SqliteDatabase(sql);
 
+  // One HTTP client per configured bot: `telegram` is the PRIMARY bot
+  // (`config.bots[0]`), the rest come from `config.bots` or an explicit inject
+  // for tests. The DO parses `/webhook/<botId>` and routes through the
+  // matching client's event stream.
   const telegram =
     deps.telegram ??
     new HttpTelegramClient({
-      botToken: config.botToken,
+      botToken: config.bots[0]!.token,
       retries: config.telegramRetry.retries,
       baseBackoffMs: config.telegramRetry.baseBackoffMs,
     });
+  const additionalBots: BotEntry[] =
+    deps.bots ??
+    config.bots.slice(1).map((b) => ({
+      botId: b.id,
+      client: new HttpTelegramClient({
+        botToken: b.token,
+        retries: config.telegramRetry.retries,
+        baseBackoffMs: config.telegramRetry.baseBackoffMs,
+      }),
+    }));
   const services = await bootServices({
     config,
     logger,
     db,
     telegram,
+    bots: additionalBots,
     runtime: deps.runtime ?? new WallClockRuntime(),
     verificationStore: deps.verificationStore ?? new InMemoryVerificationStore(),
     serializer: deps.serializer ?? immediateSerializer,
@@ -91,6 +114,7 @@ export async function buildRelay(deps: RelayDeps): Promise<Relay> {
     logger,
     db,
     services,
+    bots: services.bots,
     sweepHidden: (now = new Date()): Promise<number> => services.hides.sweep(now),
   };
 }

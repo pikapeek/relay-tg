@@ -86,7 +86,7 @@ describe("relaytg acceptance suite (SPEC §48 + extended)", () => {
     expect(question).toBeDefined();
     expect(question!.replyMarkup!.buttons).toHaveLength(4);
 
-    const state = (await h.store.get(42))!;
+    const state = (await h.store.get("main", 42))!;
     const result = await h.services.processor.process(2, verificationAnswer(42, state.questionMessageId!, state.answer, "cq", profile(42)));
     // Verified — the first-contact purpose gate then asks before any topic.
     expect(result.status).toBe("purpose_pending");
@@ -96,7 +96,7 @@ describe("relaytg acceptance suite (SPEC §48 + extended)", () => {
     const stated = await h.services.processor.process(3, userMessage(42, 101, profile(42), text("asking about a refund")));
     expect(stated.status).toBe("processed");
 
-    expect((await h.db.users.getByTelegramUserId(42))?.verifiedAt).not.toBeNull();
+    expect(await h.db.users.getVerifiedAt("main", 42)).not.toBeNull();
     expect((await h.db.users.getByTelegramUserId(42))?.purpose).toBe("asking about a refund");
     const conv = await h.db.conversations.getByTelegramUserId(42);
     expect(conv).not.toBeNull();
@@ -180,6 +180,7 @@ describe("relaytg acceptance suite (SPEC §48 + extended)", () => {
 
     await h.services.messages.create({
       conversationId: conv.id,
+      botId: "main",
       telegramChatId: GROUP_ID,
       telegramMessageId: 9001,
       telegramTopicId: conv.telegramTopicId,

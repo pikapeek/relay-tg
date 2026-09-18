@@ -14,14 +14,17 @@ export async function seeded(h: Harness) {
   return services;
 }
 
-export async function verifiedUser(h: Harness, telegramUserId: number, purpose = "test purpose"): Promise<ConversationRecord> {
+export async function verifiedUser(h: Harness, telegramUserId: number, purpose = "test purpose", botId?: string): Promise<ConversationRecord> {
   const services = buildServices(h.ctx);
+  const bot = botId ? h.bots.get(botId) : h.bots.primary();
   const { user } = await services.users.getOrCreate(profile(telegramUserId));
-  await services.users.markVerified(user.telegramUserId);
+  // Verification is per (bot, user): the fixture verifies the user on the
+  // given bot (primary by default) and opens that bot's conversation.
+  await services.users.markVerified(user.telegramUserId, bot);
   // Verification is followed by the first-contact purpose gate: the user states
   // a purpose before any topic exists, so fixtures carry one on the record.
   await services.users.setPurpose(user.telegramUserId, purpose);
-  return services.conversations.grantAccess(user);
+  return services.conversations.grantAccess(user, bot);
 }
 
 /** Reply posted by the bot back into the support group (operator command echo).

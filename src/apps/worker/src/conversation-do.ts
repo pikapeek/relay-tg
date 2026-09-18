@@ -35,7 +35,7 @@ function configEnv(env: Env): EnvSource {
 }
 
 export interface Env {
-  BOT_TOKEN: string;
+  BOTS: string;
   GROUP_ID: string;
   ADMIN_IDS?: string;
   OPERATOR_IDS?: string;
@@ -101,19 +101,35 @@ export class ConversationDO {
     }
     if (request.method !== "POST") return json(404, { ok: false, error: "not_found" });
 
+    // POST /webhook routes to the primary bot; POST /webhook/<botId> to a
+    // specific configured bot (each registers its own webhook URL with the
+    // same WEBHOOK_SECRET; the path picks the client, the header authenticates).
+    let botId: string | undefined;
+    if (url.pathname !== "/webhook") {
+      const match = /^\/webhook\/([A-Za-z0-9_-]+)$/.exec(url.pathname);
+      if (!match) return json(404, { ok: false, error: "not_found" });
+      botId = match[1];
+    }
+
     try {
       const relay = await this.relay();
+      // Unknown bot id → 404 so a misregistered webhook is caught loudly
+      // instead of silently landing on the primary bot.
+      if (botId !== undefined && !relay.bots.list().some((b) => b.botId === botId)) {
+        return json(404, { ok: false, error: "unknown_bot" });
+      }
       // See the Docker /webhook handler: with WEBHOOK_SECRET configured, reject
       // every request missing the token Telegram pairs with secret_token.
       if (relay.config.webhookSecret !== "" && request.headers.get("x-telegram-bot-api-secret-token") !== relay.config.webhookSecret) {
         return json(401, { ok: false, error: "unauthorized" });
       }
       const update = parseUpdate((await request.json()) as Parameters<typeof parseUpdate>[0]);
-      const result = await relay.services.processor.process(update.updateId, update.event);
+      const result = await relay.services.processor.process(update.updateId, update.event, botId);
       relay.logger.info("update_processed", {
         updateId: update.updateId,
         status: result.status,
         conversationId: result.conversationId,
+        botId,
       });
       return json(200, { ok: true, status: result.status });
     } catch (err) {

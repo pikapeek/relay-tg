@@ -27,10 +27,10 @@ export interface PendingEntry {
   replyToMessageId: number | null;
 }
 
-/** Queue cap per user; the oldest entry is dropped beyond this. */
+/** Queue cap per (bot, user); the oldest entry is dropped beyond this. */
 export const PENDING_MAX = 50;
 
-const PENDING_KEY = (telegramUserId: number): string => `pending:${telegramUserId}`;
+const PENDING_KEY = (botId: string, telegramUserId: number): string => `pending:${botId}:${telegramUserId}`;
 
 export class PendingService {
   private readonly db: Database;
@@ -41,20 +41,22 @@ export class PendingService {
     this.logger = ctx.logger;
   }
 
-  /** Append a message to the user's pending queue (dedupe by message id, cap
-   *  at PENDING_MAX dropping the oldest). */
-  async enqueue(telegramUserId: number, messageId: number, contentType: MessageContent["type"], replyToMessageId: number | null): Promise<void> {
-    const current = await this.list(telegramUserId);
+  /** Append a message to the (bot, user) pending queue (dedupe by message id,
+   *  cap at PENDING_MAX dropping the oldest). The queue is keyed per bot so a
+   *  pre-verification message to bot2 is flushed by bot2's conversation — the
+   *  bot that received it is the only one that can forward it. */
+  async enqueue(botId: string, telegramUserId: number, messageId: number, contentType: MessageContent["type"], replyToMessageId: number | null): Promise<void> {
+    const current = await this.list(botId, telegramUserId);
     if (current.some((e) => e.messageId === messageId)) return;
     const next = [...current, { messageId, contentType, replyToMessageId }];
     if (next.length > PENDING_MAX) next.splice(0, next.length - PENDING_MAX);
-    await this.db.settings.set(PENDING_KEY(telegramUserId), JSON.stringify(next));
-    this.logger.info("message_queued", { telegramUserId, contentType });
+    await this.db.settings.set(PENDING_KEY(botId, telegramUserId), JSON.stringify(next));
+    this.logger.info("message_queued", { telegramUserId, botId, contentType });
   }
 
   /** Read (without clearing) the pending queue. */
-  async list(telegramUserId: number): Promise<PendingEntry[]> {
-    const raw = await this.db.settings.get(PENDING_KEY(telegramUserId));
+  async list(botId: string, telegramUserId: number): Promise<PendingEntry[]> {
+    const raw = await this.db.settings.get(PENDING_KEY(botId, telegramUserId));
     if (raw == null || raw.length === 0) return [];
     try {
       const parsed = JSON.parse(raw) as PendingEntry[];
@@ -66,9 +68,9 @@ export class PendingService {
   }
 
   /** Read and clear the queue, returning what was queued. */
-  async drain(telegramUserId: number): Promise<PendingEntry[]> {
-    const entries = await this.list(telegramUserId);
-    if (entries.length > 0) await this.db.settings.set(PENDING_KEY(telegramUserId), "");
+  async drain(botId: string, telegramUserId: number): Promise<PendingEntry[]> {
+    const entries = await this.list(botId, telegramUserId);
+    if (entries.length > 0) await this.db.settings.set(PENDING_KEY(botId, telegramUserId), "");
     return entries;
   }
 }

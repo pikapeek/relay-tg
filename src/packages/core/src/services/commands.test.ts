@@ -142,13 +142,13 @@ describe("/help (8.11)", () => {
     const services = buildServices(h.ctx);
     // Start a challenge so there is a pending verification to preserve.
     await services.processor.process(1, userMessage(42, 100, profile(42), text("/start")));
-    const before = (await h.store.get(42))!;
+    const before = (await h.store.get("main", 42))!;
 
     const result = await services.processor.process(2, userMessage(42, 101, profile(42), text("/help")));
     expect(result.status).toBe("command_handled");
     expect(h.telegram.callsOf("sendMessage").find((c) => c.target.chatId === 42 && c.payload.text === TEXTS("en").userHelp)).toBeDefined();
 
-    const after = (await h.store.get(42))!;
+    const after = (await h.store.get("main", 42))!;
     expect(after.challengeId).toBe(before.challengeId);
     expect(after.attemptsLeft).toBe(before.attemptsLeft);
     expect(await h.db.conversations.getByTelegramUserId(42)).toBeNull();

@@ -21,7 +21,7 @@ import {
   bootServices,
   type CoreServices,
 } from "@relaytg/core";
-import type { Database, Runtime, Serializer, TelegramClient, VerificationStore } from "@relaytg/core";
+import type { BotEntry, BotRegistry, Database, Runtime, Serializer, TelegramClient, VerificationStore } from "@relaytg/core";
 
 /** Hourly hide sweep cadence (task 11.3). */
 export const HIDE_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
@@ -80,8 +80,12 @@ export interface AppDeps {
   env: EnvSource;
   /** Override for tests; default logs via ConsoleLogger. */
   logger?: Logger;
-  /** Override with the fake for tests; default is the real Bot API client. */
+  /** Override with the fake for tests; default is the real Bot API client.
+   *  This is the PRIMARY bot's client (`config.bots[0]`). */
   telegram?: TelegramClient;
+  /** Additional (non-primary) bot clients for tests; each must cover one of the
+   *  remaining `config.bots` entries. Defaults to one real client per bot. */
+  bots?: BotEntry[];
   runtime?: Runtime;
   serializer?: Serializer;
   verificationStore?: VerificationStore;
@@ -98,6 +102,8 @@ export interface RelayApp {
   logger: Logger;
   services: CoreServices;
   db: Database;
+  /** Every configured bot, indexed by botId (`primary()` = `config.bots[0]`). */
+  bots: BotRegistry;
   /** Run one hide sweep against the given reference time (default: now). */
   sweepHidden(now?: Date): Promise<number>;
   /** Close the HTTP server and the SQLite connection. */
@@ -121,18 +127,33 @@ export async function createApp(deps: AppDeps): Promise<RelayApp> {
   }
   const db = new SqliteDatabase(sql);
 
+  // One HTTP client per configured bot: `telegram` is the PRIMARY bot
+  // (`config.bots[0]`), the rest come from `config.bots` or an explicit inject
+  // for tests. The DO/`handleWebhookJson` routing selects the client by the
+  // `/webhook/<botId>` path segment.
   const telegram =
     deps.telegram ??
     new HttpTelegramClient({
-      botToken: config.botToken,
+      botToken: config.bots[0]!.token,
       retries: config.telegramRetry.retries,
       baseBackoffMs: config.telegramRetry.baseBackoffMs,
     });
+  const additionalBots =
+    deps.bots ??
+    config.bots.slice(1).map((b) => ({
+      botId: b.id,
+      client: new HttpTelegramClient({
+        botToken: b.token,
+        retries: config.telegramRetry.retries,
+        baseBackoffMs: config.telegramRetry.baseBackoffMs,
+      }),
+    }));
   const services = await bootServices({
     config,
     logger,
     db,
     telegram,
+    bots: additionalBots,
     runtime: deps.runtime ?? new WallClockRuntime(),
     verificationStore: deps.verificationStore ?? new InMemoryVerificationStore(),
     serializer: deps.serializer ?? new KeyedMutexSerializer(),
@@ -143,6 +164,7 @@ export async function createApp(deps: AppDeps): Promise<RelayApp> {
     logger,
     services,
     db,
+    bots: services.bots,
     sweepHidden: (now = new Date()): Promise<number> => services.hides.sweep(now),
     close: async (): Promise<void> => {
       sql.close();
@@ -156,9 +178,10 @@ export async function createApp(deps: AppDeps): Promise<RelayApp> {
 export async function handleWebhookJson(
   services: CoreServices,
   body: unknown,
+  botId?: string,
 ): Promise<{ updateId: number; result: ProcessResult }> {
   const update = parseUpdate(body as Parameters<typeof parseUpdate>[0]);
-  const result = await services.processor.process(update.updateId, update.event);
+  const result = await services.processor.process(update.updateId, update.event, botId);
   return { updateId: update.updateId, result };
 }
 
@@ -202,29 +225,49 @@ export function createHttpServer(app: RelayApp): Server {
       return;
     }
     if (req.method === "POST" && url.pathname === "/webhook") {
-      // When WEBHOOK_SECRET is configured, require the token Telegram sends
-      // alongside setWebhook's secret_token. Forged updates are the only way
-      // in — an unauthenticated endpoint lets anyone impersonate users/operators.
-      if (app.config.webhookSecret !== "" && req.headers["x-telegram-bot-api-secret-token"] !== app.config.webhookSecret) {
-        sendJson(res, 401, { ok: false, error: "unauthorized" });
+      await handleWebhook(app, req, res);
+      return;
+    }
+    // POST /webhook/<botId> routes the update to a specific configured bot
+    // (e.g. the second entry of BOTS). Each bot registers its own webhook URL
+    // with the same WEBHOOK_SECRET; the path picks the client, the header
+    // authenticates.
+    const match = /^\/webhook\/([A-Za-z0-9_-]+)$/.exec(url.pathname);
+    if (req.method === "POST" && match) {
+      const botId = match[1];
+      // Unknown bot id → 404 so a misregistered webhook is caught loudly
+      // instead of silently landing on the primary bot.
+      if (!app.bots.list().some((b) => b.botId === botId)) {
+        sendJson(res, 404, { ok: false, error: "unknown_bot" });
         return;
       }
-      try {
-        const raw = await readBody(req);
-        const body = JSON.parse(raw) as unknown;
-        const { updateId, result } = await handleWebhookJson(app.services, body);
-        app.logger.info("update_processed", { updateId, status: result.status });
-        sendJson(res, 200, { ok: true, status: result.status });
-      } catch (err) {
-        if (err instanceof BodyTooLargeError) {
-          sendJson(res, 413, { ok: false, error: "payload_too_large" });
-          return;
-        }
-        app.logger.error("system_error", { errorKind: "webhook" });
-        sendJson(res, 400, { ok: false, error: "bad_request" });
-      }
+      await handleWebhook(app, req, res, botId);
       return;
     }
     sendJson(res, 404, { ok: false, error: "not_found" });
   });
+}
+
+async function handleWebhook(app: RelayApp, req: IncomingMessage, res: ServerResponse, botId?: string): Promise<void> {
+  // When WEBHOOK_SECRET is configured, require the token Telegram sends
+  // alongside setWebhook's secret_token. Forged updates are the only way
+  // in — an unauthenticated endpoint lets anyone impersonate users/operators.
+  if (app.config.webhookSecret !== "" && req.headers["x-telegram-bot-api-secret-token"] !== app.config.webhookSecret) {
+    sendJson(res, 401, { ok: false, error: "unauthorized" });
+    return;
+  }
+  try {
+    const raw = await readBody(req);
+    const body = JSON.parse(raw) as unknown;
+    const { updateId, result } = await handleWebhookJson(app.services, body, botId);
+    app.logger.info("update_processed", { updateId, status: result.status, botId });
+    sendJson(res, 200, { ok: true, status: result.status });
+  } catch (err) {
+    if (err instanceof BodyTooLargeError) {
+      sendJson(res, 413, { ok: false, error: "payload_too_large" });
+      return;
+    }
+    app.logger.error("system_error", { errorKind: "webhook" });
+    sendJson(res, 400, { ok: false, error: "bad_request" });
+  }
 }

@@ -3,7 +3,7 @@ import { DEFAULTS, loadConfig } from "./config.ts";
 import { ValidationError } from "./errors.ts";
 
 const BASE = {
-  BOT_TOKEN: "123456:ABC",
+  BOTS: "main:123456:ABC",
   GROUP_ID: "-1001234567890",
 };
 
@@ -46,10 +46,31 @@ describe("config loader", () => {
     expect(cfg.verification.ttlSeconds).toBe(120);
   });
 
-  it("rejects a missing bot token and bad ids", () => {
+  it("rejects a missing BOTS and bad ids", () => {
     expect(() => loadConfig({ GROUP_ID: "-1001" })).toThrow(ValidationError);
     expect(() => loadConfig({ ...BASE, ADMIN_IDS: "abc" })).toThrow(ValidationError);
     expect(() => loadConfig({ ...BASE, GROUP_ID: "not-a-number" })).toThrow(ValidationError);
+  });
+
+  it("parses a single BOTS entry, splitting name and token on the FIRST colon", () => {
+    const cfg = loadConfig({ ...BASE, BOTS: "bot1:123456:AA-Token" });
+    expect(cfg.bots).toEqual([{ id: "bot1", token: "123456:AA-Token" }]);
+  });
+
+  it("parses multiple BOTS entries in order (first bot is primary)", () => {
+    const cfg = loadConfig({ ...BASE, BOTS: "bot1:t1:a, bot2:t2:b ,bot3:t3:c" });
+    expect(cfg.bots).toEqual([
+      { id: "bot1", token: "t1:a" },
+      { id: "bot2", token: "t2:b" },
+      { id: "bot3", token: "t3:c" },
+    ]);
+  });
+
+  it("rejects malformed BOTS entries", () => {
+    expect(() => loadConfig({ ...BASE, BOTS: "" })).toThrow(ValidationError);
+    expect(() => loadConfig({ ...BASE, BOTS: "no-token-here" })).toThrow(ValidationError);
+    expect(() => loadConfig({ ...BASE, BOTS: ":abc" })).toThrow(ValidationError);
+    expect(() => loadConfig({ ...BASE, BOTS: "bad name:abc" })).toThrow(ValidationError);
   });
 
   it("defaults ad detection to enabled, auto-block on, and the built-in keyword blocklist", () => {

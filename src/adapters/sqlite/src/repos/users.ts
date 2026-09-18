@@ -54,7 +54,6 @@ export class SqliteUsers implements UserRepository {
       languageCode: input.languageCode,
       preferredLanguage: null,
       isBot: input.isBot,
-      verifiedAt: null,
       approvedAt: null,
       purpose: null,
       purposeAt: null,
@@ -75,10 +74,27 @@ export class SqliteUsers implements UserRepository {
     return rows.map((row) => mapUser(row) as UserRecord);
   }
 
-  async setVerifiedAt(telegramUserId: number, at: Date): Promise<void> {
+  async getVerifiedAt(botId: string, telegramUserId: number): Promise<string | null> {
+    const row = this.sql
+      .prepare("SELECT verified_at FROM user_verifications WHERE bot_id = ? AND telegram_user_id = ?")
+      .get(botId, telegramUserId) as { verified_at: string } | undefined;
+    return row?.verified_at ?? null;
+  }
+
+  async setVerifiedAt(botId: string, telegramUserId: number, at: Date): Promise<void> {
     this.sql
-      .prepare("UPDATE users SET verified_at = ?, updated_at = ? WHERE telegram_user_id = ?")
-      .run(iso(at), iso(at), telegramUserId);
+      .prepare(
+        `INSERT INTO user_verifications (bot_id, telegram_user_id, verified_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT (bot_id, telegram_user_id) DO UPDATE SET verified_at = excluded.verified_at`,
+      )
+      .run(botId, telegramUserId, iso(at));
+  }
+
+  async clearVerified(botId: string, telegramUserId: number): Promise<void> {
+    this.sql
+      .prepare("DELETE FROM user_verifications WHERE bot_id = ? AND telegram_user_id = ?")
+      .run(botId, telegramUserId);
   }
 
   async setApprovedAt(telegramUserId: number, at: Date): Promise<void> {
@@ -94,11 +110,13 @@ export class SqliteUsers implements UserRepository {
   }
 
   async resetAccess(telegramUserId: number): Promise<void> {
-    // A /delete resets the whole gate, including the stored purpose: the next
-    // contact must verify again AND state a fresh purpose, which opens the new
-    // topic as its single pinned purpose+info card.
+    // A /delete resets the global access fields (approved_at + the stored
+    // purpose): the next contact must re-gate AND state a fresh purpose, which
+    // opens the new topic as its single pinned purpose+info card. Per-bot
+    // verification is NOT a users-row field — the caller clears it separately
+    // via clearVerified(botId, userId) for the deleted conversation's bot.
     this.sql
-      .prepare("UPDATE users SET verified_at = NULL, approved_at = NULL, purpose = NULL, purpose_at = NULL, updated_at = ? WHERE telegram_user_id = ?")
+      .prepare("UPDATE users SET approved_at = NULL, purpose = NULL, purpose_at = NULL, updated_at = ? WHERE telegram_user_id = ?")
       .run(iso(new Date()), telegramUserId);
   }
 }

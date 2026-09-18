@@ -10,6 +10,7 @@
 import type { Config } from "@relaytg/shared";
 import type { TelegramClient } from "../ports.ts";
 import type { ServiceContext } from "./service-context.ts";
+import type { BotRegistry } from "./bot-registry.ts";
 
 export interface SelfCheckProbe {
   ok: boolean;
@@ -28,20 +29,29 @@ export interface SelfCheckReport {
 
 export class SelfCheckService {
   private readonly telegram: TelegramClient;
+  private readonly bots: BotRegistry;
   private readonly config: Config;
 
   constructor(ctx: ServiceContext) {
     this.telegram = ctx.telegram;
+    this.bots = ctx.bots;
     this.config = ctx.config;
   }
 
-  async run(): Promise<SelfCheckReport> {
-    const botIdentity = { id: 0, username: "" };
+async run(): Promise<SelfCheckReport> {
+    // Every configured bot must resolve via getMe; the report lists them all so
+    // a deployment with several bots sees each one verified. The enforce-admin
+    // probe uses the PRIMARY bot's identity (with the PRIMARY client) — it is the
+    // one that runs the group control surface, so its adminship is what matters.
+    const botIds: number[] = [];
     const bot = await this.probe(async () => {
-      const me = await this.telegram.getMe();
-      botIdentity.id = me.id;
-      botIdentity.username = me.username;
-      return { ok: true, detail: `@${me.username}` };
+      const usernames: string[] = [];
+      for (const b of this.bots.list()) {
+        const me = await b.client.getMe();
+        botIds.push(me.id);
+        usernames.push(`@${me.username}`);
+      }
+      return { ok: true, detail: usernames.join(", ") };
     });
     if (!bot.ok) {
       // A bad token makes the remaining probes meaningless; skip them rather
@@ -58,7 +68,7 @@ export class SelfCheckService {
       ? await this.probe(async () => {
           const member = await this.telegram.getChatMember({
             chatId: this.config.supportGroupId,
-            userId: botIdentity.id,
+            userId: botIds[0]!,
           });
           if (member.status === "administrator" || member.status === "creator") {
             return { ok: true, detail: member.status };

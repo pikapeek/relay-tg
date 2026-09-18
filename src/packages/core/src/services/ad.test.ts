@@ -12,7 +12,7 @@ import { AdDetectionService } from "./index.ts";
 function adHarness(env: Record<string, string> = {}) {
   const h = makeHarness(
     loadConfig({
-      BOT_TOKEN: "test-token",
+      BOTS: "main:test-token",
       GROUP_ID: "-100123456789",
       ADMIN_IDS: "111",
       OPERATOR_IDS: "222",

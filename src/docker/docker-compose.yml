@@ -6,7 +6,7 @@
 #
 # Configuration comes from the repo-root `.env` (see .env.example); the compose
 # file lives two levels down, so paths below are relative to src/docker/ and
-# reach back up with `../../`. BOT_TOKEN is read from the environment at startup
+# reach back up with `../../`. BOTS is read from the environment at startup
 # and never lands in the image or the database.
 # ---------------------------------------------------------------------------
 

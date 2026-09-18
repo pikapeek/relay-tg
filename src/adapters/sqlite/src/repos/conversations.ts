@@ -14,9 +14,21 @@ export class SqliteConversations implements ConversationRepository {
     return mapRow<ConversationRecord>(this.sql.prepare("SELECT * FROM conversations WHERE id = ?").get(id));
   }
 
+  /** The user's most recent conversation across all bots (multi-bot fallback;
+   *  exact (bot, user) lookup is getByBotAndUser). */
   async getByTelegramUserId(telegramUserId: number): Promise<ConversationRecord | null> {
     return mapRow<ConversationRecord>(
-      this.sql.prepare("SELECT * FROM conversations WHERE telegram_user_id = ?").get(telegramUserId),
+      this.sql
+        .prepare("SELECT * FROM conversations WHERE telegram_user_id = ? ORDER BY last_activity_at DESC, rowid DESC LIMIT 1")
+        .get(telegramUserId),
+    );
+  }
+
+  async getByBotAndUser(botId: string, telegramUserId: number): Promise<ConversationRecord | null> {
+    return mapRow<ConversationRecord>(
+      this.sql
+        .prepare("SELECT * FROM conversations WHERE bot_id = ? AND telegram_user_id = ?")
+        .get(botId, telegramUserId),
     );
   }
 
@@ -30,6 +42,7 @@ export class SqliteConversations implements ConversationRepository {
     const createdAt = iso(now);
     const row: ConversationRecord = {
       id: newId(),
+      botId: input.botId,
       telegramUserId: input.telegramUserId,
       telegramTopicId: input.telegramTopicId,
       assignedOperatorId: input.assignedOperatorId,
@@ -41,10 +54,10 @@ export class SqliteConversations implements ConversationRepository {
     this.sql
       .prepare(
         `INSERT INTO conversations
-           (id, telegram_user_id, telegram_topic_id, assigned_operator_id, last_activity_at, hidden_at, hide_after_hours, created_at)
-         VALUES (?, ?, ?, ?, ?, NULL, NULL, ?)`,
+           (id, bot_id, telegram_user_id, telegram_topic_id, assigned_operator_id, last_activity_at, hidden_at, hide_after_hours, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
       )
-      .run(row.id, row.telegramUserId, row.telegramTopicId, row.assignedOperatorId, row.lastActivityAt, row.createdAt);
+      .run(row.id, row.botId, row.telegramUserId, row.telegramTopicId, row.assignedOperatorId, row.lastActivityAt, row.createdAt);
     return row;
   }
 

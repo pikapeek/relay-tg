@@ -12,15 +12,16 @@ export class SqliteProcessedUpdates implements ProcessedUpdatesRepository {
   /** Claim an update_id before processing. The INSERT OR IGNORE writes the row
    *  exactly once; the per-claim nonce distinguishes the inserting claim from a
    *  duplicate (which keeps its own nonce in the row), independent of the
-   *  runtime clock. */
-  async claim(updateId: number, now: Date): Promise<boolean> {
+   *  runtime clock. Update ids increment per bot — the claim is (bot_id,
+   *  update_id) scoped. */
+  async claim(botId: string, updateId: number, now: Date): Promise<boolean> {
     const claimId = newId();
     this.sql
-      .prepare("INSERT OR IGNORE INTO processed_updates (update_id, claim_id, processed_at) VALUES (?, ?, ?)")
-      .run(updateId, claimId, iso(now));
+      .prepare("INSERT OR IGNORE INTO processed_updates (bot_id, update_id, claim_id, processed_at) VALUES (?, ?, ?, ?)")
+      .run(botId, updateId, claimId, iso(now));
     const check = this.sql
-      .prepare("SELECT COUNT(*) AS c FROM processed_updates WHERE update_id = ? AND claim_id = ?")
-      .get(updateId, claimId);
+      .prepare("SELECT COUNT(*) AS c FROM processed_updates WHERE bot_id = ? AND update_id = ? AND claim_id = ?")
+      .get(botId, updateId, claimId);
     return check != null && Number(check.c) === 1;
   }
 }

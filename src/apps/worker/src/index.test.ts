@@ -22,7 +22,7 @@ const GROUP_ID = "-1001234567890";
 
 function configEnv(overrides: Record<string, string> = {}): Record<string, string> {
   return {
-    BOT_TOKEN: "test-token-not-a-secret",
+    BOTS: "main:test-token-not-a-secret",
     GROUP_ID,
     AUTO_HIDE_HOURS: "168",
     ...overrides,
@@ -185,11 +185,11 @@ describe("ConversationDO (12.1, 12.2, 12.3)", () => {
     // through the DO fetch.
     const relay = await (doInstance as unknown as { relay(): Promise<Relay> }).relay();
     await relay.services.users.getOrCreate(profile(42));
-    await relay.services.users.markVerified(42);
+    await relay.services.users.markVerified(42, relay.bots.primary());
     // The first-contact purpose gate runs before any topic exists: a stated
     // purpose means the message below relays instead of being consumed as one.
     await relay.services.users.setPurpose(42, "test purpose");
-    const conversation = await relay.services.conversations.grantAccess((await relay.services.users.getByTelegramUserId(42))!);
+    const conversation = await relay.services.conversations.grantAccess((await relay.services.users.getByTelegramUserId(42))!, relay.bots.primary());
     expect(conversation.telegramTopicId).not.toBeNull();
 
     const res = await post(doInstance, "https://relaytg.example/webhook", userUpdate(2002, 601, 42, "hello support"));
@@ -229,13 +229,13 @@ describe("ConversationDO (12.1, 12.2, 12.3)", () => {
 
     const relay = await (doInstance as unknown as { relay(): Promise<Relay> }).relay();
     const { user: userA } = await relay.services.users.getOrCreate(profile(1001));
-    await relay.services.users.markVerified(1001);
-    const convA = await relay.services.conversations.grantAccess(userA);
+    await relay.services.users.markVerified(1001, relay.bots.primary());
+    const convA = await relay.services.conversations.grantAccess(userA, relay.bots.primary());
     await relay.db.conversations.touchActivity(convA.id, stale);
 
     const { user: userB } = await relay.services.users.getOrCreate(profile(1002));
-    await relay.services.users.markVerified(1002);
-    const convB = await relay.services.conversations.grantAccess(userB);
+    await relay.services.users.markVerified(1002, relay.bots.primary());
+    const convB = await relay.services.conversations.grantAccess(userB, relay.bots.primary());
     await relay.db.conversations.setHideAfterHours(convB.id, 0);
     // Permanent policy and still under the 7-day cap → skipped.
     await relay.db.conversations.touchActivity(convB.id, moderate);
@@ -253,11 +253,40 @@ describe("ConversationDO (12.1, 12.2, 12.3)", () => {
     expect(state.alarms.length).toBe(2);
     expect(state.alarms[1]).toBeGreaterThan(Date.now());
   });
+
+  it("routes POST /webhook/<botId> to that bot's client (not the primary's)", async () => {
+    const telegram = new FakeTelegramClient();
+    const second = new FakeTelegramClient();
+    const state = new FakeDoState(new FakeDoSqlHandle());
+    const doInstance = new ConversationDO(
+      state as unknown as DurableObjectState,
+      makeEnv(configEnv({ BOTS: "main:test-token-not-a-secret,second:other-token" })),
+      { telegram, bots: [{ botId: "second", client: second }] },
+    );
+
+    const res = await post(doInstance, "https://relaytg.example/webhook/second", userUpdate(5001, 901, 92001, "hi"));
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({ ok: true, status: "verification_issued" });
+
+    // The challenge goes out through the second bot's client; the primary
+    // client must not see it.
+    expect(second.callsOf("sendMessage").length).toBe(1);
+    expect(telegram.callsOf("sendMessage").length).toBe(0);
+  });
+
+  it("404s POST /webhook/<unknown bot>", async () => {
+    const state = new FakeDoState(new FakeDoSqlHandle());
+    const doInstance = new ConversationDO(state as unknown as DurableObjectState, makeEnv(configEnv()));
+
+    const res = await post(doInstance, "https://relaytg.example/webhook/nope", userUpdate(5002, 902, 92002, "hi"));
+    expect(res.status).toBe(404);
+    await expect(res.json()).resolves.toEqual({ ok: false, error: "unknown_bot" });
+  });
 });
 
 describe("embedded migrations", () => {
   it("matches the on-disk migrations/*.sql so the two cannot drift", () => {
-    const files = ["001_initial.sql", "002_preferred_language.sql", "003_purpose.sql"];
+    const files = ["001_initial.sql", "002_preferred_language.sql", "003_purpose.sql", "004_multi_bot.sql", "005_per_bot_verification.sql"];
     expect(MIGRATIONS).toHaveLength(files.length);
     for (const file of files) {
       const fromDisk = readFileSync(new URL(`../../../migrations/${file}`, import.meta.url), "utf8");

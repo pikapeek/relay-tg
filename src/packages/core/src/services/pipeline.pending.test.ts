@@ -25,20 +25,20 @@ describe("pending queue (未验证消息暂存)", () => {
     const second = await services.processor.process(2, userMessage(42, 101, profile(42), text("i have a question")));
     expect(second.status).toBe("verification_issued");
 
-    const queued = JSON.parse((await h.db.settings.get("pending:42"))!);
+    const queued = JSON.parse((await h.db.settings.get("pending:main:42"))!);
     expect(queued.map((e: { messageId: number }) => e.messageId)).toEqual([100, 101]);
     expect(await h.db.users.getByTelegramUserId(42)).toBeNull();
     expect(await h.db.conversations.getByTelegramUserId(42)).toBeNull();
 
     // Correct verification answer: verified, but the purpose gate holds — the
     // queue is NOT flushed yet (there is no conversation to flush into).
-    const state = (await h.store.get(42))!;
+    const state = (await h.store.get("main", 42))!;
     const answered = await services.processor.process(
       3,
       verificationAnswer(42, state.questionMessageId!, state.answer, "cq", profile(42)),
     );
     expect(answered.status).toBe("purpose_pending");
-    expect(await h.db.settings.get("pending:42")).not.toBe("");
+    expect(await h.db.settings.get("pending:main:42")).not.toBe("");
 
     // The purpose statement opens the conversation and flushes the queue in order.
     const opened = await services.processor.process(4, userMessage(42, 200, profile(42), text("checking my order")));
@@ -54,7 +54,7 @@ describe("pending queue (未验证消息暂存)", () => {
 
     // Both relays are recorded; the queue is empty; the purpose was consumed.
     expect(recordsForConversation(h, conv!.id).map((m) => m.telegramMessageId)).toEqual([100, 101]);
-    expect(await h.db.settings.get("pending:42")).toBe("");
+    expect(await h.db.settings.get("pending:main:42")).toBe("");
     expect((await h.db.users.getByTelegramUserId(42))?.purpose).toBe("checking my order");
 
     expect(h.logger.has("message_queued")).toBe(true);
@@ -67,7 +67,7 @@ describe("pending queue (未验证消息暂存)", () => {
 
     // An ad message is rejected before the gate — nothing is enqueued.
     await services.processor.process(1, userMessage(42, 100, profile(42), text("扫码 加微信 联系")));
-    expect(await h.db.settings.get("pending:42")).toBeNull();
+    expect(await h.db.settings.get("pending:main:42")).toBeNull();
     expect(h.logger.has("message_queued")).toBe(false);
   });
 });

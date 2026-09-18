@@ -22,7 +22,7 @@ describe("structured logger", () => {
     const lines: string[] = [];
     const logger = new ConsoleLogger({ component: "test", sink: (l) => lines.push(l) });
     // Deliberately misuse the API: a secret under a non-allowlisted key.
-    logger.info("message_relayed", { telegramUserId: 1, body: "BOT_TOKEN=super-secret-value" } as never);
+    logger.info("message_relayed", { telegramUserId: 1, body: "BOTS=main:super-secret-value" } as never);
     const line = lines[0];
     expect(line).not.toContain("super-secret-value");
     expect(line).not.toContain("body");

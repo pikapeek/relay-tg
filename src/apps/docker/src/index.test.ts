@@ -14,7 +14,7 @@ import type { AppDeps, RelayApp } from "./app.ts";
 import { createApp, createHttpServer } from "./app.ts";
 
 const TEST_ENV = {
-  BOT_TOKEN: "test-token-not-a-secret",
+  BOTS: "main:test-token-not-a-secret",
   GROUP_ID: "-1001234567890",
 };
 
@@ -155,6 +155,52 @@ describe("docker runtime HTTP surface (11.1)", () => {
   });
 });
 
+describe("docker runtime multi-bot webhook routing", () => {
+  it("routes POST /webhook/<botId> to that bot's client (not the primary's)", async () => {
+    const telegram = new FakeTelegramClient();
+    const second = new FakeTelegramClient();
+    const app = await createApp({
+      env: makeEnv({ BOTS: "main:test-token-not-a-secret,second:other-token" }),
+      databasePath: ":memory:",
+      telegram,
+      bots: [{ botId: "second", client: second }],
+    } satisfies AppDeps);
+    apps.push(app);
+    const { baseUrl } = await startServer(app);
+
+    const update = {
+      update_id: 4001,
+      message: {
+        message_id: 801,
+        from: { id: 91001, is_bot: false, first_name: "Bob" },
+        chat: { id: 91001, type: "private" },
+        text: "hello",
+      },
+    };
+    const res = await fetch(`${baseUrl}/webhook/second`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(update),
+    });
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({ ok: true, status: "verification_issued" });
+
+    // The four-choice challenge goes out through the second bot's client;
+    // the primary client must not see it.
+    expect(second.callsOf("sendMessage").length).toBe(1);
+    expect(telegram.callsOf("sendMessage").length).toBe(0);
+  });
+
+  it("404s POST /webhook/<unknown bot>", async () => {
+    const { app } = await makeApp();
+    const { baseUrl } = await startServer(app);
+
+    const res = await fetch(`${baseUrl}/webhook/nope`, { method: "POST", body: "{}" });
+    expect(res.status).toBe(404);
+    await expect(res.json()).resolves.toEqual({ ok: false, error: "unknown_bot" });
+  });
+});
+
 describe("docker runtime persistence (11.2)", () => {
   it("survives a full app restart on a file-backed database", async () => {
     const dir = mkdtempSync(join(tmpdir(), "relaytg-"));
@@ -171,7 +217,7 @@ describe("docker runtime persistence (11.2)", () => {
       languageCode: "en",
       isBot: false,
     });
-    const { conversation } = await app1.services.conversations.ensureForUser(user);
+    const { conversation } = await app1.services.conversations.ensureForUser(user, app1.bots.primary());
     await app1.close();
 
     // Second boot: same file, fresh graph. Data must still be there.
@@ -205,7 +251,7 @@ describe("docker runtime hide sweep (11.3)", () => {
       languageCode: "en",
       isBot: false,
     });
-    const { conversation: convA } = await app.services.conversations.ensureForUser(userA);
+    const { conversation: convA } = await app.services.conversations.ensureForUser(userA, app.bots.primary());
     await app.db.conversations.touchActivity(convA.id, stale);
 
     // Conversation B: permanent policy (never-hide) and still under the 7-day cap -> skipped.
@@ -217,7 +263,7 @@ describe("docker runtime hide sweep (11.3)", () => {
       languageCode: "en",
       isBot: false,
     });
-    const { conversation: convB } = await app.services.conversations.ensureForUser(userB);
+    const { conversation: convB } = await app.services.conversations.ensureForUser(userB, app.bots.primary());
     await app.db.conversations.setHideAfterHours(convB.id, 0);
     await app.db.conversations.touchActivity(convB.id, moderate);
 
@@ -230,7 +276,7 @@ describe("docker runtime hide sweep (11.3)", () => {
       languageCode: "en",
       isBot: false,
     });
-    const { conversation: convC } = await app.services.conversations.ensureForUser(userC);
+    const { conversation: convC } = await app.services.conversations.ensureForUser(userC, app.bots.primary());
     await app.db.conversations.touchActivity(convC.id, recent);
 
     const hidden = await app.sweepHidden(now);
@@ -261,7 +307,7 @@ describe("docker runtime hide sweep (11.3)", () => {
       languageCode: "en",
       isBot: false,
     });
-    const { conversation } = await app.services.conversations.ensureForUser(user);
+    const { conversation } = await app.services.conversations.ensureForUser(user, app.bots.primary());
     await app.db.conversations.touchActivity(conversation.id, stale);
 
     expect(await app.sweepHidden(now)).toBe(1);

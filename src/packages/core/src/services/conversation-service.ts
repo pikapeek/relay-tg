@@ -6,21 +6,22 @@
 // ---------------------------------------------------------------------------
 
 import { TelegramError, type ConversationRecord, type Logger, type UserRecord } from "@relaytg/shared";
-import type { Database, Runtime, TelegramClient } from "../ports.ts";
+import type { Database, Runtime } from "../ports.ts";
 import { TOPIC_PIN_KEY } from "../ports.ts";
+import type { BotInfo, BotRegistry } from "./bot-registry.ts";
 import type { ServiceContext } from "./service-context.ts";
 import type { TopicService } from "./topic-service.ts";
 
 export class ConversationService {
   private readonly db: Database;
-  private readonly telegram: TelegramClient;
+  private readonly bots: BotRegistry;
   private readonly runtime: Runtime;
   private readonly logger: Logger;
   private readonly topics: TopicService;
 
   constructor(ctx: ServiceContext, topics: TopicService) {
     this.db = ctx.db;
-    this.telegram = ctx.telegram;
+    this.bots = ctx.bots;
     this.runtime = ctx.runtime;
     this.logger = ctx.logger;
     this.topics = topics;
@@ -28,6 +29,11 @@ export class ConversationService {
 
   getByTelegramUserId(telegramUserId: number): Promise<ConversationRecord | null> {
     return this.db.conversations.getByTelegramUserId(telegramUserId);
+  }
+
+  /** The single conversation for a (bot × user) pair. */
+  getByBotAndUser(botId: string, telegramUserId: number): Promise<ConversationRecord | null> {
+    return this.db.conversations.getByBotAndUser(botId, telegramUserId);
   }
 
   getByTopicId(telegramTopicId: number): Promise<ConversationRecord | null> {
@@ -39,13 +45,13 @@ export class ConversationService {
   }
 
   /**
-   * Reuse the user's existing conversation; otherwise create the forum topic
-   * and the conversation row. Two concurrent callers for a brand-new user are
-   * serialized by the per-conversation lock (Docker mutex / DO queue). After the
-   * topic is created the row insert is re-checked: a conversation may have
-   * appeared since our first read, so the topic is only linked to the winner —
-   * the loser's fresh topic is deleted again to avoid a permanently orphaned
-   * forum topic.
+   * Reuse the user's conversation with this bot; otherwise create the forum
+   * topic and the conversation row bound to `bot`. Two concurrent callers for a
+   * brand-new (bot, user) pair are serialized by the per-conversation lock
+   * (Docker mutex / DO queue). After the topic is created the row insert is
+   * re-checked: a conversation may have appeared since our first read, so the
+   * topic is only linked to the winner — the loser's fresh topic is deleted
+   * again to avoid a permanently orphaned forum topic.
    *
    * The user-info card is posted for the winner only (never for a topic that is
    * about to be dropped), and can be deferred with `postCard: false` so the
@@ -54,17 +60,19 @@ export class ConversationService {
    */
   async ensureForUser(
     user: UserRecord,
+    bot: BotInfo,
     opts: { postCard?: boolean } = {},
   ): Promise<{ conversation: ConversationRecord; created: boolean }> {
-    const existing = await this.db.conversations.getByTelegramUserId(user.telegramUserId);
+    const existing = await this.db.conversations.getByBotAndUser(bot.botId, user.telegramUserId);
     if (existing) return { conversation: existing, created: false };
 
-    const topicId = await this.topics.createTopic(user);
+    const topicId = await this.topics.createTopic(user, { botId: bot.botId });
     const res = await this.db.transaction(async (tx) => {
-      const winner = await tx.conversations.getByTelegramUserId(user.telegramUserId);
+      const winner = await tx.conversations.getByBotAndUser(bot.botId, user.telegramUserId);
       if (winner) return { conversation: winner, created: false, droppedTopicId: topicId };
       const conversation = await tx.conversations.create(
         {
+          botId: bot.botId,
           telegramUserId: user.telegramUserId,
           telegramTopicId: topicId,
           assignedOperatorId: null,
@@ -75,11 +83,12 @@ export class ConversationService {
     });
 
     if (res.droppedTopicId != null) {
-      // Lost the create race: another conversation owns the user now. Remove the
-      // topic we built for nothing; failures here are best-effort.
+      // Lost the create race: another conversation owns the (bot, user) now.
+      // Remove the topic we built for nothing; failures here are best-effort.
       await this.topics.deleteTopic(res.droppedTopicId);
       this.logger.info("conversation_lost_race", {
         telegramUserId: user.telegramUserId,
+        botId: bot.botId,
         droppedTopicId: res.droppedTopicId,
       });
       return { conversation: res.conversation, created: false };
@@ -87,21 +96,22 @@ export class ConversationService {
     // The winner's topic gets its user-info card — unless the caller deferred it
     // (the purpose-gate path posts its own single pinned purpose+info card).
     if (opts.postCard !== false) {
-      await this.topics.postIdentityCard(topicId, user);
+      await this.topics.postIdentityCard(topicId, user, { bot });
     }
     this.logger.info("conversation_created", {
       conversationId: res.conversation.id,
       telegramUserId: user.telegramUserId,
+      botId: bot.botId,
       topicId,
     });
     return { conversation: res.conversation, created: true };
   }
 
-  /** Create-or-reuse the conversation. No welcome message is sent to the
-   *  user's private chat — the topic's pinned purpose+info card is the only
-   *  opening message the user relates to. */
-  async grantAccess(user: UserRecord, opts: { postCard?: boolean } = {}): Promise<ConversationRecord> {
-    const { conversation } = await this.ensureForUser(user, opts);
+  /** Create-or-reuse the conversation bound to `bot`. No welcome message is
+   *  sent to the user's private chat — the topic's pinned purpose+info card is
+   *  the only opening message the user relates to. */
+  async grantAccess(user: UserRecord, bot: BotInfo, opts: { postCard?: boolean } = {}): Promise<ConversationRecord> {
+    const { conversation } = await this.ensureForUser(user, bot, opts);
     return conversation;
   }
 
@@ -131,8 +141,11 @@ export class ConversationService {
       await tx.messages.deleteByConversationId(conversation.id);
       await tx.notes.deleteByConversationId(conversation.id);
       await tx.conversations.delete(conversation.id);
-      // Deleting a conversation re-locks the door: the user must verify again
-      // (and, for a first-timer, still state a purpose) before a new topic opens.
+      // Deleting a conversation re-locks THAT bot's door: the user must verify
+      // again on this bot (and, for a first-timer, still state a purpose)
+      // before a new topic opens. Verification is per (bot, user) — the user's
+      // OTHER bots' conversations (and verification) are untouched.
+      await tx.users.clearVerified(conversation.botId, conversation.telegramUserId);
       await tx.users.resetAccess(conversation.telegramUserId);
       // The topic is gone, so its stored first-pin protection goes with it — a
       // recreated conversation pins and protects a fresh card.
@@ -146,13 +159,16 @@ export class ConversationService {
     if (conversation.telegramTopicId != null) {
       await this.topics.deleteTopic(conversation.telegramTopicId);
     }
-    // Mirror the deletion onto the user's side: every OPERATOR_TO_USER copy the
-    // bot delivered into the user's private chat is removed when the topic
+    // Mirror the deletion onto the user's side: every OPERATOR_TO_USER copy
+    // this bot delivered into the user's private chat is removed when the topic
     // goes. Deletions older than 48 h (or already gone) are logged and dropped.
+    // The retract must go through the conversation's own bot — the copy was
+    // delivered by it, and only a bot the user has chatted with can touch it.
+    const userSideClient = this.bots.get(conversation.botId).client;
     const userChatDeletes: number[] = [...deliveredCopyIds];
     for (const messageId of userChatDeletes) {
       try {
-        await this.telegram.deleteMessage({ chatId: conversation.telegramUserId, messageId });
+        await userSideClient.deleteMessage({ chatId: conversation.telegramUserId, messageId });
       } catch (err) {
         this.logger.warn("copy_delete_failed", {
           conversationId: conversation.id,

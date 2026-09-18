@@ -38,7 +38,11 @@ export function normalizedFirstName(telegramUserId: number, firstName: string | 
 
 /** users.is_bot is stored as 0/1; core records carry a real boolean. */
 export function mapUser(row: SqlRow | null): UserRecord | null {
-  const mapped = mapRow<UserRecord>(row);
+  // `users.verified_at` is a legacy column (pre-005) — verification now lives
+  // per (bot, user) in `user_verifications`, so it is stripped here and never
+  // surfaces on the record.
+  const mapped = mapRow<UserRecord & { verifiedAt?: string }>(row);
   if (!mapped) return null;
-  return { ...mapped, isBot: Number(mapped.isBot) === 1 };
+  const { verifiedAt: _legacyVerified, ...rest } = mapped;
+  return { ...rest, isBot: Number(rest.isBot) === 1 };
 }

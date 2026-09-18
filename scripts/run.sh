@@ -5,10 +5,10 @@
 #
 # One line, with options:
 #   bash <(curl -fsSL https://raw.githubusercontent.com/pikapeek/relay-tg/main/scripts/run.sh) \
-#     --token=1234567890:TOKEN --group=-1001234567890 --admin=111,222
+#     --bots=main:123456:TOKEN --group=-1001234567890 --admin=111,222
 #
 # Options (any may be omitted; required ones are then asked interactively):
-#   --token=       Bot token from @BotFather
+#   --bots=        Bots as "name:token,name2:token2"; first is primary
 #   --group=       Numeric support-group id, e.g. -1001234567890
 #   --admin=       Comma-separated admin user ids
 #   --operator=    Comma-separated operator user ids
@@ -33,7 +33,7 @@ set -euo pipefail
 URL=https://github.com/pikapeek/relay-tg.git
 DIR=relay-tg
 
-CONFIG_TOKEN=""
+CONFIG_BOTS=""
 CONFIG_GROUP=""
 CONFIG_ADMIN=""
 CONFIG_OPERATOR=""
@@ -46,7 +46,9 @@ usage() {
 Usage: bash <(curl -fsSL <run.sh-url>) [options]
 
 Options (omit any to be asked interactively / use defaults):
-  --token=<BOT_TOKEN>    Bot token from @BotFather (required)
+  --bots=<BOTS>          Bots as "name:token,name2:token2"; first is primary
+                         (required). Token contains ':' so the name is everything
+                         before the FIRST colon of each comma-separated entry.
   --group=<GROUP_ID>     Numeric support-group id, e.g. -1001234567890 (required)
   --admin=<IDS>          Comma-separated admin user ids
   --operator=<IDS>       Comma-separated operator user ids
@@ -58,8 +60,8 @@ EOF
 
 for arg in "$@"; do
   case "$arg" in
-    --token=*)     CONFIG_TOKEN="${arg#*=}" ;;
-    --group=*)     CONFIG_GROUP="${arg#*=}" ;;
+    --bots=*)       CONFIG_BOTS="${arg#*=}" ;;
+    --group=*)      CONFIG_GROUP="${arg#*=}" ;;
     --admin=*)     CONFIG_ADMIN="${arg#*=}" ;;
     --operator=*)  CONFIG_OPERATOR="${arg#*=}" ;;
     --port=*)      CONFIG_PORT="${arg#*=}" ;;
@@ -200,14 +202,14 @@ upsert() { # key value
 
 WRITE_ENV=false
 [ ! -f .env ] && WRITE_ENV=true
-[ -n "$CONFIG_TOKEN$CONFIG_GROUP$CONFIG_ADMIN$CONFIG_OPERATOR$CONFIG_PORT$CONFIG_DB$CONFIG_AUTO_HIDE" ] && WRITE_ENV=true
-if [ -f .env ] && grep -q '^BOT_TOKEN=.*REPLACE_WITH_REAL_TOKEN' .env; then
-  echo "==> .env still has the placeholder BOT_TOKEN — reconfiguring"
+[ -n "$CONFIG_BOTS$CONFIG_GROUP$CONFIG_ADMIN$CONFIG_OPERATOR$CONFIG_PORT$CONFIG_DB$CONFIG_AUTO_HIDE" ] && WRITE_ENV=true
+if [ -f .env ] && grep -q '^BOTS=.*REPLACE_WITH_REAL_TOKEN' .env; then
+  echo "==> .env still has the placeholder BOTS — reconfiguring"
   WRITE_ENV=true
 fi
 
 if [ "$WRITE_ENV" = true ]; then
-  TOKEN="${CONFIG_TOKEN:-$(env_value BOT_TOKEN)}"
+  BOTS="${CONFIG_BOTS:-$(env_value BOTS)}"
   GROUP="${CONFIG_GROUP:-$(env_value GROUP_ID)}"
   ADMIN="${CONFIG_ADMIN:-$(env_value ADMIN_IDS)}"
   OPERATOR="${CONFIG_OPERATOR:-$(env_value OPERATOR_IDS)}"
@@ -215,22 +217,22 @@ if [ "$WRITE_ENV" = true ]; then
   DB="${CONFIG_DB:-$(env_value DATABASE_PATH)}"
   AUTO_HIDE="${CONFIG_AUTO_HIDE:-$(env_value AUTO_HIDE_HOURS)}"
 
-  if [ -z "$TOKEN" ]; then
-    printf "BOT_TOKEN (paste from @BotFather; not echoed): "
-    read -rs TOKEN
+  if [ -z "$BOTS" ]; then
+    printf "BOTS (name:token from @BotFather, e.g. main:123456:AA...; not echoed): "
+    read -rs BOTS
     printf '\n'
   fi
   if [ -z "$GROUP" ]; then
     printf "GROUP_ID (numeric support-group id, e.g. -1001234567890): "
     read -r GROUP
   fi
-  if [ -z "$TOKEN" ] || [ -z "$GROUP" ]; then
-    echo "error: BOT_TOKEN and GROUP_ID are required" >&2
+  if [ -z "$BOTS" ] || [ -z "$GROUP" ]; then
+    echo "error: BOTS and GROUP_ID are required" >&2
     exit 1
   fi
 
   [ ! -f .env ] && cp .env.example .env
-  upsert BOT_TOKEN "$TOKEN"
+  upsert BOTS "$BOTS"
   upsert GROUP_ID "$GROUP"
   [ -n "$ADMIN" ] && upsert ADMIN_IDS "$ADMIN"
   [ -n "$OPERATOR" ] && upsert OPERATOR_IDS "$OPERATOR"

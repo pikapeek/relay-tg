@@ -14,8 +14,8 @@
 // ---------------------------------------------------------------------------
 
 import { beforeEach, describe, expect, it } from "vitest";
-import type { Database, ServiceContext, CoreServices } from "@relaytg/core";
-import { buildServices, OPERATOR_TEXTS, TEXTS } from "@relaytg/core";
+import type { BotRegistry, Database, ServiceContext, CoreServices } from "@relaytg/core";
+import { botRegistryFrom, buildServices, OPERATOR_TEXTS, TEXTS } from "@relaytg/core";
 import {
   CaptureLogger,
   FakeRuntime,
@@ -118,6 +118,7 @@ export interface RelayHarness {
   /** Raw SqlDb handle — lets scenarios assert exact row counts on both stacks. */
   sql: SqlDb;
   telegram: FakeTelegramClient;
+  bots: BotRegistry;
   runtime: FakeRuntime;
   logger: CaptureLogger;
   store: MemoryVerificationStore;
@@ -126,7 +127,7 @@ export interface RelayHarness {
 
 export function baseConfig(): Config {
   return loadConfig({
-    BOT_TOKEN: "test-token",
+    BOTS: "main:test-token",
     GROUP_ID: "-100123456789",
     ADMIN_IDS: "111",
     OPERATOR_IDS: "222,333",
@@ -138,10 +139,20 @@ export async function makeRelayHarness(db: Database, sql: SqlDb): Promise<RelayH
   const runtime = new FakeRuntime();
   const logger = new CaptureLogger();
   const store = new MemoryVerificationStore();
-  const ctx: ServiceContext = { db, telegram, runtime, config: baseConfig(), logger, verificationStore: store, serializer: immediateSerializer };
+  const config = baseConfig();
+  const clients = config.bots.map((_bot, i) => (i === 0 ? telegram : new FakeTelegramClient()));
+  const bots = botRegistryFrom(
+    config.bots.map((bot, i) => ({
+      botId: bot.id,
+      client: clients[i]!,
+      botTelegramUserId: clients[i]!.meResult.id,
+      botUsername: clients[i]!.meResult.username,
+    })),
+  );
+  const ctx: ServiceContext = { db, telegram, bots, runtime, config, logger, verificationStore: store, serializer: immediateSerializer };
   const services = buildServices(ctx);
   await services.operators.seed();
-  return { ctx, db, sql, telegram, runtime, logger, store, services };
+  return { ctx, db, sql, telegram, bots, runtime, logger, store, services };
 }
 
 // ---------------------------------------------------------------------------
@@ -150,7 +161,7 @@ export async function makeRelayHarness(db: Database, sql: SqlDb): Promise<RelayH
 
 export async function markVerified(h: RelayHarness, telegramUserId: number, purpose = "test purpose"): Promise<void> {
   const { user } = await h.services.users.getOrCreate(profile(telegramUserId));
-  await h.services.users.markVerified(user.telegramUserId);
+  await h.services.users.markVerified(user.telegramUserId, h.bots.primary());
   // Verification is followed by the first-contact purpose gate: the user states
   // a purpose before any topic exists, so fixtures carry one on the record.
   await h.services.users.setPurpose(user.telegramUserId, purpose);
@@ -159,7 +170,7 @@ export async function markVerified(h: RelayHarness, telegramUserId: number, purp
 /** Open the user's conversation (topic + welcome) without any relayed messages. */
 export async function openConversation(h: RelayHarness, telegramUserId: number) {
   const user = (await h.services.users.getByTelegramUserId(telegramUserId))!;
-  return h.services.conversations.grantAccess(user);
+  return h.services.conversations.grantAccess(user, h.bots.primary());
 }
 
 export function topicSends(h: RelayHarness, topicId: number, method = "sendMessage"): RecordedCall[] {
@@ -269,14 +280,14 @@ export function relaySuite(label: string, makeDb: () => Promise<SqlDb>, migratio
       expect(question!.replyMarkup!.buttons).toHaveLength(4);
 
       // A wrong tap consumes an attempt and re-asks in place (still 4 choices).
-      const state = (await h.store.get(42))!;
+      const state = (await h.store.get("main", 42))!;
       const wrong = state.choices.find((c) => c !== state.answer)!;
       const wrongResult = await h.services.processor.process(
         2,
         verificationAnswer(42, state.questionMessageId!, wrong, "cq-wrong", profile(42)),
       );
       expect(wrongResult.status).toBe("verification_issued");
-      const after = (await h.store.get(42))!;
+      const after = (await h.store.get("main", 42))!;
       expect(after.attemptsLeft).toBe(state.attemptsLeft - 1);
       const reAsk = h.telegram.callsOf("editMessageText").find((c) => c.target.messageId === state.questionMessageId);
       expect(reAsk).toBeDefined();
@@ -299,7 +310,7 @@ export function relaySuite(label: string, makeDb: () => Promise<SqlDb>, migratio
       expect(stated.status).toBe("processed");
 
       const user = await h.db.users.getByTelegramUserId(42);
-      expect(user?.verifiedAt).not.toBeNull();
+      expect(await h.db.users.getVerifiedAt("main", 42)).not.toBeNull();
       expect(user?.purpose).toBe("asking about a refund");
       const conv = await h.db.conversations.getByTelegramUserId(42);
       expect(conv).not.toBeNull();
@@ -363,6 +374,7 @@ export function relaySuite(label: string, makeDb: () => Promise<SqlDb>, migratio
       // Operator's earlier message: group 9001 → user-chat copy 3000.
       await h.services.messages.create({
         conversationId: conv.id,
+        botId: "main",
         telegramChatId: GROUP_ID,
         telegramMessageId: 9001,
         telegramTopicId: conv.telegramTopicId,

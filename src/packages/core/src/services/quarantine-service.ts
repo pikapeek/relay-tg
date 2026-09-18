@@ -18,17 +18,21 @@ import { ConversationError, type Logger, type MessageContent, type UserProfile }
 import type { Config, ConversationRecord } from "@relaytg/shared";
 import type { Database, Runtime, TelegramClient } from "../ports.ts";
 import { OPERATOR_TEXTS } from "./texts.ts";
+import type { BotInfo } from "./bot-registry.ts";
 import type { ServiceContext } from "./service-context.ts";
 
 /** The quarantined copy's id plus enough to restore/record it. `fwdId` is the
  *  copy's message id inside the quarantine topic — the mapping key and the
- *  restore source. */
+ *  restore source. `botId` is the bot the sender messaged: only that bot can
+ *  forward the original from their private chat, and a `/ad restore` opens the
+ *  sender's conversation with it. */
 export interface QuarantinedMessage {
   fwdId: number;
   userId: number;
   chatId: number;
   messageId: number;
   contentType: MessageContent["type"];
+  botId: string;
 }
 
 export interface QuarantineEntry {
@@ -85,13 +89,15 @@ export class QuarantineService {
   /** Quarantine an ad hit: forward the message into the quarantine topic, map
    *  the copy, notify inside the topic. On any failure, fall back to the old
    *  group-general-chat notification — an admin must never be left blind. This
-   *  method never throws. */
-  async quarantine(entry: QuarantineEntry): Promise<void> {
+   *  method never throws. The forward reads the sender's original from the
+   *  private chat they share with `bot`, so the quarantine goes through that
+   *  bot's client; the group-side notifications stay on the PRIMARY bot. */
+  async quarantine(entry: QuarantineEntry, bot: BotInfo): Promise<void> {
     const name = entry.sender.firstName ?? entry.sender.username ?? String(entry.sender.telegramUserId);
     const text = OPERATOR_TEXTS("en").adAutoBlocked(name, entry.sender.username, entry.sender.telegramUserId, entry.reason, entry.excerpt);
     try {
       const topicId = await this.ensureTopic();
-      const fwdId = await this.telegram.forwardMessage({
+      const fwdId = await bot.client.forwardMessage({
         chatId: this.config.supportGroupId,
         messageThreadId: topicId,
         fromChatId: entry.chatId,
@@ -103,6 +109,7 @@ export class QuarantineService {
         chatId: entry.chatId,
         messageId: entry.messageId,
         contentType: entry.content.type,
+        botId: bot.botId,
       };
       await this.db.settings.set(SPAM_Q_KEY(fwdId), JSON.stringify(record));
       // The notice lives inside the quarantine topic; on a failure below it is
@@ -136,6 +143,7 @@ export class QuarantineService {
         typeof parsed?.userId !== "number" ||
         typeof parsed?.chatId !== "number" ||
         typeof parsed?.messageId !== "number" ||
+        typeof parsed?.botId !== "string" ||
         parsed.fwdId !== fwdId
       ) {
         return null;
@@ -166,6 +174,7 @@ export class QuarantineService {
     await this.db.messages.create(
       {
         conversationId: conversation.id,
+        botId: conversation.botId,
         telegramChatId: entry.chatId,
         telegramMessageId: entry.messageId,
         telegramTopicId: topicId,

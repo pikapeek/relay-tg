@@ -28,8 +28,8 @@ describe("/restore (8.9)", () => {
     // Keep the username attached to the user row (a later bare-profile upsert
     // would clear it, so set it once at creation).
     const { user } = await services.users.getOrCreate(profile(42, { username: "alice" }));
-    await services.users.markVerified(user.telegramUserId);
-    const conv = await services.conversations.grantAccess(user);
+    await services.users.markVerified(user.telegramUserId, h.bots.primary());
+    const conv = await services.conversations.grantAccess(user, h.bots.primary());
     await h.telegram.hideForumTopic({ chatId: GROUP_ID, messageThreadId: conv.telegramTopicId! });
     await h.db.conversations.setHidden(conv.id, h.runtime.now().toISOString());
 

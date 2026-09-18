@@ -1,12 +1,14 @@
 // ---------------------------------------------------------------------------
 // UserService (task 5.1): get-or-create by telegram_user_id, refresh profile
-// fields on every contact, reject bot senders, manage the verified_at flag.
+// fields on every contact, reject bot senders, manage per-(bot, user) human
+// verification (markVerified) and the global purpose/language fields.
 // Username is display-only and never an identity key.
 // ---------------------------------------------------------------------------
 
 import type { UserProfile, UserRecord } from "@relaytg/shared";
 import type { Database, Runtime } from "../ports.ts";
 import type { Logger } from "@relaytg/shared";
+import type { BotInfo } from "./bot-registry.ts";
 import type { ServiceContext } from "./service-context.ts";
 import type { Language } from "./texts.ts";
 import { effectiveLanguageOf } from "./effective-language.ts";
@@ -56,10 +58,12 @@ export class UserService {
     return effectiveLanguageOf(this.db, profile);
   }
 
-  /** Set the verified flag; idempotent once set. */
-  async markVerified(telegramUserId: number): Promise<void> {
-    await this.db.users.setVerifiedAt(telegramUserId, this.runtime.now());
-    this.logger.info("user_verified", { telegramUserId });
+  /** Set the verification flag on the given bot; idempotent once set.
+   *  Verification is per (bot, user) — the flag for one bot never grants
+   *  access on another. */
+  async markVerified(telegramUserId: number, bot: BotInfo): Promise<void> {
+    await this.db.users.setVerifiedAt(bot.botId, telegramUserId, this.runtime.now());
+    this.logger.info("user_verified", { telegramUserId, botId: bot.botId });
   }
 
   /** Record the purpose stated at first contact (来意) and return the updated

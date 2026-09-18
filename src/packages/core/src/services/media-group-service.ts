@@ -67,8 +67,9 @@ export class MediaGroupService {
     // Serialize with the same conversation's ingestion so the topic-recovery /
     // topic-mapping writes never race a concurrent message. The updates that
     // buffered these items were already claimed; a failure here is async and
-    // only logged (Telegram won't retry them).
-    await this.serializer.runExclusive(`u:${conversation.telegramUserId}`, () => this.deliver(conversation, items));
+    // only logged (Telegram won't retry them). The key matches ingestion's
+    // per-(bot, user) serializer key.
+    await this.serializer.runExclusive(`u:${conversation.botId}:${conversation.telegramUserId}`, () => this.deliver(conversation, items));
   }
 
   private async deliver(conversation: ConversationRecord, items: UserMessageEvent[]): Promise<void> {

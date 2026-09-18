@@ -33,6 +33,7 @@ describe("MessageService — records & resolution (6.1-6.2)", () => {
 
     await services.messages.create({
       conversationId: conversation.id,
+      botId: "main",
       telegramChatId: 42,
       telegramMessageId: 1001,
       telegramTopicId: conversation.telegramTopicId,
@@ -69,6 +70,7 @@ describe("MessageService — records & resolution (6.1-6.2)", () => {
     // originating from group message 9001.
     await services.messages.create({
       conversationId: a.id,
+      botId: "main",
       telegramChatId: GROUP_ID,
       telegramMessageId: 9001,
       telegramTopicId: a.telegramTopicId,
@@ -107,6 +109,7 @@ describe("reply preservation (6.3)", () => {
     // Operator's earlier message: group 9001 → user-chat copy 3000.
     await services.messages.create({
       conversationId: conv.id,
+      botId: "main",
       telegramChatId: GROUP_ID,
       telegramMessageId: 9001,
       telegramTopicId: conv.telegramTopicId,
@@ -139,6 +142,7 @@ describe("reply preservation (6.3)", () => {
     // User's earlier message: user chat 1001 → topic copy 2000.
     await services.messages.create({
       conversationId: conv.id,
+      botId: "main",
       telegramChatId: 42,
       telegramMessageId: 1001,
       telegramTopicId: conv.telegramTopicId,
@@ -238,7 +242,7 @@ describe("media groups (6.4)", () => {
     // aggregation window closes, so lift the cap for this burst.
     const h = makeHarness(
       loadConfig({
-        BOT_TOKEN: "test-token",
+        BOTS: "main:test-token",
         GROUP_ID: "-100123456789",
         ADMIN_IDS: "111",
         OPERATOR_IDS: "222,333",
@@ -337,7 +341,7 @@ describe("topic recovery (6.5)", () => {
     await services.users.getOrCreate(profile(42));
     // Force the conversation row without a topic.
     const bare = await h.db.conversations.create(
-      { telegramUserId: 42, telegramTopicId: null, assignedOperatorId: null },
+      { botId: "main", telegramUserId: 42, telegramTopicId: null, assignedOperatorId: null },
       h.runtime.now(),
     );
     await expect(

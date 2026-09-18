@@ -24,9 +24,10 @@ export interface UserRecord {
    *  Resolution is `preferredLanguage ?? languageCode`. */
   preferredLanguage: string | null;
   isBot: boolean;
-  /** ISO timestamp set once the user passes the arithmetic verification. */
-  verifiedAt: string | null;
-  /** ISO timestamp set once an admin approves a `/apply` application. */
+  /** ISO timestamp set once an admin approves a `/apply` application. Globally
+   *  trusted (an approved/operator human skips verification on every bot).
+   *  Human verification itself is per (bot, user) and lives in the
+   *  `user_verifications` table — NOT on this record. */
   approvedAt: string | null;
   /** The purpose of contact stated at first contact (来意), gate for opening
    *  the first conversation. Null = gate still pending. Persists across
@@ -54,6 +55,9 @@ export function displayName(p: UserProfile): string {
 
 export interface ConversationRecord {
   id: string;
+  /** The configured bot this conversation is bound to — a human has one
+   *  conversation per bot; (botId, telegramUserId) is unique. */
+  botId: string;
   telegramUserId: number;
   /** Forum topic id in the support group; null until a topic is created. */
   telegramTopicId: number | null;
@@ -71,6 +75,10 @@ export interface ConversationRecord {
 export interface MessageRecord {
   id: string;
   conversationId: string;
+  /** Bot the source message lives in. Required for source uniqueness: a human's
+   *  private chat id is the same number across every bot, while message ids
+   *  restart at 1 per (bot, chat). */
+  botId: string;
   /** Chat where the message was created (user private chat or support group). */
   telegramChatId: number;
   /** Message id where the message was created. */
@@ -172,12 +180,14 @@ export interface UserUpsertInput {
 }
 
 export interface ConversationCreateInput {
+  botId: string;
   telegramUserId: number;
   telegramTopicId: number | null;
   assignedOperatorId: string | null;
 }
 
 export interface MessageCreateInput {
+  botId: string;
   conversationId: string;
   telegramChatId: number;
   telegramMessageId: number;

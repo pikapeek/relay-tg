@@ -34,18 +34,19 @@ function defaultRandomId(): string {
 /** Transient verification challenge store (D14). In-memory by design: a
  *  restart only loses in-flight challenges. Identical on both runtimes. */
 export class InMemoryVerificationStore implements VerificationStore {
-  private readonly states = new Map<number, VerificationState>();
+  /** Composite key `${botId}:${telegramUserId}` — independent per bot. */
+  private readonly states = new Map<string, VerificationState>();
 
-  async get(telegramUserId: number): Promise<VerificationState | null> {
-    return this.states.get(telegramUserId) ?? null;
+  async get(botId: string, telegramUserId: number): Promise<VerificationState | null> {
+    return this.states.get(`${botId}:${telegramUserId}`) ?? null;
   }
 
-  async set(telegramUserId: number, state: VerificationState): Promise<void> {
-    this.states.set(telegramUserId, state);
+  async set(botId: string, telegramUserId: number, state: VerificationState): Promise<void> {
+    this.states.set(`${botId}:${telegramUserId}`, state);
   }
 
-  async delete(telegramUserId: number): Promise<void> {
-    this.states.delete(telegramUserId);
+  async delete(botId: string, telegramUserId: number): Promise<void> {
+    this.states.delete(`${botId}:${telegramUserId}`);
   }
 }
 

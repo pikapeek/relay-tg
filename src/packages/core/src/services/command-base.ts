@@ -9,6 +9,7 @@
 import { type ConversationRecord, type Config, type Logger, type OperatorMessageEvent } from "@relaytg/shared";
 import type { Database, Runtime, TelegramClient } from "../ports.ts";
 import type { ServiceContext } from "./service-context.ts";
+import type { BotInfo, BotRegistry } from "./bot-registry.ts";
 import type { ConversationService } from "./conversation-service.ts";
 import type { HideService } from "./hide-service.ts";
 import type { OperatorService } from "./operator-service.ts";
@@ -40,32 +41,38 @@ export interface CommandsDeps {
 export abstract class CommandBase {
   protected readonly db: Database;
   protected readonly telegram: TelegramClient;
+  protected readonly bots: BotRegistry;
   protected readonly runtime: Runtime;
   protected readonly config: Config;
   protected readonly logger: Logger;
   protected readonly deps: CommandsDeps;
-  /** The bot's own telegram_user_id, resolved at boot (getMe) — see the
-   *  ServiceContext doc comment. Guards /delete against the bot's own thread. */
-  protected readonly botTelegramUserId: number | undefined;
 
   constructor(ctx: ServiceContext, deps: CommandsDeps) {
     this.db = ctx.db;
     this.telegram = ctx.telegram;
+    this.bots = ctx.bots;
     this.runtime = ctx.runtime;
     this.config = ctx.config;
     this.logger = ctx.logger;
     this.deps = deps;
-    this.botTelegramUserId = ctx.botTelegramUserId;
   }
 
-  protected async send(event: OperatorMessageEvent, text: string): Promise<void> {
-    await this.sendTo(event.chatId, event.messageThreadId ?? undefined, text);
+  /** The client that owns a reply: the event's bot for private-chat call sites,
+   *  the PRIMARY bot (the group control surface) when none is given. */
+  protected clientFor(bot?: BotInfo): TelegramClient {
+    return bot?.client ?? this.telegram;
+  }
+
+  protected async send(event: OperatorMessageEvent, text: string, bot?: BotInfo): Promise<void> {
+    await this.sendTo(event.chatId, event.messageThreadId ?? undefined, text, bot);
   }
 
   /** Send into an arbitrary chat (group general chat, a topic, or a private
-   *  chat) — shared by the event-shaped helpers and the picker/list methods. */
-  protected async sendTo(chatId: number, messageThreadId: number | undefined, text: string): Promise<void> {
-    await this.telegram.sendMessage({ chatId, messageThreadId, text });
+   *  chat) — shared by the event-shaped helpers and the picker/list methods.
+   *  Group replies default to the PRIMARY bot; private-chat call sites pass the
+   *  event's bot so the reply lands in the chat the operator is actually in. */
+  protected async sendTo(chatId: number, messageThreadId: number | undefined, text: string, bot?: BotInfo): Promise<void> {
+    await this.clientFor(bot).sendMessage({ chatId, messageThreadId, text });
   }
 
   protected async adminOnly(
@@ -82,13 +89,14 @@ export abstract class CommandBase {
     await fn();
   }
 
-  /** `/delete` must never remove the requester's own conversation, the bot's,
-   *  or a staff member's — deleting the support team's own threads (and
-   *  resetting the owner's access) is always a mistake, whichever delete path
-   *  is used. */
+  /** `/delete` must never remove the requester's own conversation, one with any
+   *  configured bot as its owner (a user who only ever talked to the bot is the
+   *  bot's own thread, and only removing the row would reset that bot's access),
+   *  or a staff member's — deleting the support team's own threads is always a
+   *  mistake, whichever delete path is used. */
   protected async isProtectedDeleteTarget(senderTelegramUserId: number, conversation: ConversationRecord): Promise<boolean> {
     if (conversation.telegramUserId === senderTelegramUserId) return true;
-    if (conversation.telegramUserId === this.botTelegramUserId) return true;
+    if (this.bots.list().some((b) => b.botTelegramUserId === conversation.telegramUserId)) return true;
     return this.deps.operators.isOperator(conversation.telegramUserId);
   }
 

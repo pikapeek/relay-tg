@@ -15,6 +15,7 @@ export class SqliteMessages implements MessageRepository {
     const row: MessageRecord = {
       id: newId(),
       conversationId: input.conversationId,
+      botId: input.botId,
       telegramChatId: input.telegramChatId,
       telegramMessageId: input.telegramMessageId,
       telegramTopicId: input.telegramTopicId,
@@ -28,13 +29,14 @@ export class SqliteMessages implements MessageRepository {
     this.sql
       .prepare(
         `INSERT INTO messages
-           (id, conversation_id, telegram_chat_id, telegram_message_id, telegram_topic_id, relayed_message_id,
+           (id, conversation_id, bot_id, telegram_chat_id, telegram_message_id, telegram_topic_id, relayed_message_id,
             direction, sender_type, content_type, reply_to_message_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.id,
         row.conversationId,
+        row.botId,
         row.telegramChatId,
         row.telegramMessageId,
         row.telegramTopicId,

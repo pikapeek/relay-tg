@@ -32,6 +32,7 @@ import {
   type UserMessageEvent,
 } from "@relaytg/shared";
 import type { Database, Runtime, SendTarget, TelegramClient } from "../ports.ts";
+import type { BotInfo, BotRegistry } from "./bot-registry.ts";
 import type { ServiceContext } from "./service-context.ts";
 import type { ConversationService } from "./conversation-service.ts";
 import type { MessageService } from "./message-service.ts";
@@ -53,6 +54,7 @@ interface SendWithRecoveryResult<T> {
 export class Relayer {
   private readonly db: Database;
   private readonly telegram: TelegramClient;
+  private readonly bots: BotRegistry;
   private readonly runtime: Runtime;
   private readonly config: Config;
   private readonly logger: Logger;
@@ -62,11 +64,19 @@ export class Relayer {
   constructor(ctx: ServiceContext, deps: RelayerDeps, messages: MessageService) {
     this.db = ctx.db;
     this.telegram = ctx.telegram;
+    this.bots = ctx.bots;
     this.runtime = ctx.runtime;
     this.config = ctx.config;
     this.logger = ctx.logger;
     this.deps = deps;
     this.messages = messages;
+  }
+
+  /** The client of the bot a conversation is bound to — every user-side send
+   *  (forward from their private chat, deliver to it, edit/delete the copy,
+   *  avatar fetch) goes through this bot, never the primary. */
+  private botFor(conversation: ConversationRecord): BotInfo {
+    return this.bots.get(conversation.botId);
   }
 
   /** User → operator: forward the user's message into their topic and record
@@ -110,7 +120,7 @@ export class Relayer {
         continue;
       }
       const { relayedId, topicId: actualTopicId } = await this.withTopicRecovery(current, (t) =>
-        this.telegram.sendMediaGroup({
+        this.botFor(current).client.sendMediaGroup({
           chatId: this.config.supportGroupId,
           messageThreadId: t,
           items: toMediaItems(chunk),
@@ -119,6 +129,7 @@ export class Relayer {
       for (let i = 0; i < chunk.length; i++) {
         await this.messages.create({
           conversationId: current.id,
+          botId: current.botId,
           telegramChatId: chunk[i].chatId,
           telegramMessageId: chunk[i].messageId,
           telegramTopicId: actualTopicId,
@@ -186,8 +197,11 @@ export class Relayer {
     conversation: ConversationRecord,
     params: { fromChatId: number; messageId: number; contentType: MessageContent["type"]; replyToMessageId: number | null; kind?: string },
   ): Promise<number> {
+    // Only the bot the user wrote to can forward their message (the source
+    // chat lives in that bot's private chat), so the forward uses the
+    // conversation's own client — never the primary.
     const { relayedId, topicId: actualTopicId } = await this.withTopicRecovery(conversation, (t) =>
-      this.telegram.forwardMessage({
+      this.botFor(conversation).client.forwardMessage({
         chatId: this.config.supportGroupId,
         fromChatId: params.fromChatId,
         messageId: params.messageId,
@@ -196,6 +210,7 @@ export class Relayer {
     );
     await this.messages.create({
       conversationId: conversation.id,
+      botId: conversation.botId,
       telegramChatId: params.fromChatId,
       telegramMessageId: params.messageId,
       telegramTopicId: actualTopicId,
@@ -230,6 +245,7 @@ export class Relayer {
     if (relayedId == null) return;
     await this.messages.create({
       conversationId: conversation.id,
+      botId: conversation.botId,
       telegramChatId: event.chatId,
       telegramMessageId: event.messageId,
       telegramTopicId: event.messageThreadId,
@@ -271,7 +287,9 @@ export class Relayer {
       this.logger.info("message_edit_dropped", { conversationId: record.conversationId, contentType: event.content.type, status: "unmappable" });
       return "dropped";
     }
-    const ok = await this.applyEditSafe(conversation.telegramUserId, record.relayedMessageId, event.content);
+    // The user-chat copy was delivered by the conversation's bot — only that bot
+    // can edit it, so the edit goes through its client.
+    const ok = await this.applyEditSafe(this.botFor(conversation).client, conversation.telegramUserId, record.relayedMessageId, event.content);
     if (!ok) {
       this.logger.info("message_edit_dropped", { conversationId: record.conversationId, contentType: event.content.type, status: "not_editable" });
       return "dropped";
@@ -282,15 +300,16 @@ export class Relayer {
 
   // -------------------------------------------------------------------------
 
-  /** Deliver to the user's chat. Null = permanent failure (e.g. user blocked
-   *  the bot) handled as an undeliverable drop; retryable errors propagate. */
+  /** Deliver to the user's chat via the conversation's own bot. Null =
+   *  permanent failure (e.g. user blocked the bot) handled as an undeliverable
+   *  drop; retryable errors propagate. */
   private async deliverToUser(
     conversation: ConversationRecord,
     target: SendTarget,
     content: MessageContent,
   ): Promise<number | null> {
     try {
-      return await this.telegram.sendContent(target, content);
+      return await this.botFor(conversation).client.sendContent(target, content);
     } catch (err) {
       if (err instanceof TelegramError && err.isRetryable()) throw err;
       this.logger.warn("relay_undeliverable", {
@@ -322,11 +341,15 @@ export class Relayer {
       if (isTopicNotFound(err)) {
         const user = await this.db.users.getByTelegramUserId(conversation.telegramUserId);
         if (!user) throw err;
-        const freshTopicId = await this.deps.topics.createTopic(user, { conversationId: conversation.id });
+        const freshTopicId = await this.deps.topics.createTopic(user, {
+          conversationId: conversation.id,
+          botId: conversation.botId,
+        });
         await this.db.conversations.updateTopicId(conversation.id, freshTopicId);
         // Best-effort: a recovered topic still opens with the user-info card so
-        // operators can tell who they are replying to.
-        await this.deps.topics.postIdentityCard(freshTopicId, user);
+        // operators can tell who they are replying to. The card is built from
+        // the conversation's bot (the user's contact with it).
+        await this.deps.topics.postIdentityCard(freshTopicId, user, { bot: this.botFor(conversation) });
         this.logger.info("topic_created", {
           conversationId: conversation.id,
           telegramUserId: conversation.telegramUserId,
@@ -353,11 +376,12 @@ export class Relayer {
     }
   }
 
-  /** Edit the copy; stickers can't be edited. Failures degrade to "dropped". */
-  private async applyEditSafe(chatId: number, messageId: number, content: MessageContent): Promise<boolean> {
+  /** Edit the copy through the bot that delivered it; stickers can't be
+   *  edited. Failures degrade to "dropped". */
+  private async applyEditSafe(client: TelegramClient, chatId: number, messageId: number, content: MessageContent): Promise<boolean> {
     if (content.type === "text") {
       try {
-        await this.telegram.editMessageText({ chatId, messageId, text: content.text });
+        await client.editMessageText({ chatId, messageId, text: content.text });
         return true;
       } catch {
         return false;
@@ -365,7 +389,7 @@ export class Relayer {
     }
     if (content.type === "sticker") return false;
     try {
-      await this.telegram.editMessageCaption({ chatId, messageId, caption: content.caption ?? "" });
+      await client.editMessageCaption({ chatId, messageId, caption: content.caption ?? "" });
       return true;
     } catch {
       return false;

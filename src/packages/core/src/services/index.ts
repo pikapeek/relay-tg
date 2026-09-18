@@ -6,6 +6,8 @@
 export type { ServiceContext } from "./service-context.ts";
 export { TEXTS, OPERATOR_TEXTS, resolveLanguage } from "./texts.ts";
 export type { Language } from "./texts.ts";
+export { resolveBots, botRegistryFrom } from "./bot-registry.ts";
+export type { BotEntry, BotInfo, BotIdentity, BotRegistry } from "./bot-registry.ts";
 export {
   USER_COMMANDS,
   USER_COMMANDS_ZH,
@@ -97,8 +99,11 @@ export function buildServices(ctx: ServiceContext): CoreServices {
   const operators = new OperatorService(ctx);
   const verification = new VerificationService(ctx);
   // Menu registration reads the live operator registry, so an approval that
-  // promotes someone to OPERATOR can re-register with the updated roster.
-  const refreshMenus = (): Promise<void> => setCommandMenu(ctx.telegram, ctx.config, ctx.logger, () => operators.list());
+  // promotes someone to OPERATOR can re-register with the updated roster. Every
+  // configured bot publishes its own menu — the group control surface is the
+  // PRIMARY bot's, but each bot's private chat needs its own setMyCommands.
+  const refreshMenus = (): Promise<void> =>
+    Promise.all(ctx.bots.list().map((b) => setCommandMenu(b.client, ctx.config, ctx.logger, () => operators.list()))).then(() => {});
   const approvals = new ApprovalService(ctx, conversations, (id) => operators.isAdmin(id), refreshMenus);
   const hides = new HideService(ctx);
   const messages = new MessageService(ctx);
@@ -111,8 +116,12 @@ export function buildServices(ctx: ServiceContext): CoreServices {
   const selfCheck = new SelfCheckService(ctx);
   // A /lang change re-applies just that user's menus (role-aware) so the
   // suggestion menu follows the stored preference, not just the client language.
+  // Every bot that may meet the user gets the menu — the preference is global
+  // per human, so switching it in a bot1 chat must move bot2's menu too.
   const syncUserMenu = (telegramUserId: number, lang: UserMenuChoice): Promise<void> =>
-    applyUserMenu(ctx.telegram, ctx.config, ctx.logger, () => operators.list(), telegramUserId, lang);
+    Promise.all(
+      ctx.bots.list().map((b) => applyUserMenu(b.client, ctx.config, ctx.logger, () => operators.list(), telegramUserId, lang)),
+    ).then(() => {});
   const commands = new CommandService(ctx, { users, conversations, operators, hides, syncUserMenu, selfCheck, ad, topics, quarantine });
   const processor = new UpdateProcessor(
     ctx,

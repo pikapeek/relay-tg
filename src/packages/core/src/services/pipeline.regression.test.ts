@@ -66,16 +66,16 @@ describe("review-fix regressions (2026-09)", () => {
     const h = makeHarness();
     const services = buildServices(h.ctx);
     await services.processor.process(1, userMessage(42, 100, profile(42), text("/start")));
-    let state = (await h.store.get(42))!;
+    let state = (await h.store.get("main", 42))!;
     expect(state.attemptsLeft).toBe(3);
     const wrong = state.choices.find((c) => c !== state.answer)!;
     await services.processor.process(2, verificationAnswer(42, state.questionMessageId!, wrong, "cq-1", profile(42)));
-    state = (await h.store.get(42))!;
+    state = (await h.store.get("main", 42))!;
     expect(state.attemptsLeft).toBe(2);
 
     const result = await services.processor.process(3, userMessage(42, 102, profile(42), text("/start")));
     expect(result.status).toBe("verification_issued");
-    expect((await h.store.get(42))!.attemptsLeft).toBe(2);
+    expect((await h.store.get("main", 42))!.attemptsLeft).toBe(2);
 
     // The re-ask edited the existing question in place — no second question message.
     const questions = h.telegram.callsOf("sendMessage").filter((c) => c.target.chatId === 42 && c.replyMarkup != null);

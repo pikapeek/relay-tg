@@ -35,7 +35,7 @@ describe("user → operator pipeline (7.2)", () => {
     expect(question).toBeDefined();
     expect(question!.replyMarkup!.buttons).toHaveLength(4);
 
-    const state = (await h.store.get(42))!;
+    const state = (await h.store.get("main", 42))!;
     expect(state).not.toBeNull();
     const answers = question!.replyMarkup!.buttons.map((b) => Number(b.callbackData!.replace("verify:", "")));
     expect(new Set(answers).size).toBe(4);
@@ -49,7 +49,7 @@ describe("user → operator pipeline (7.2)", () => {
     const h = makeHarness();
     const services = buildServices(h.ctx);
     await services.processor.process(1, userMessage(42, 100, profile(42), text("/start")));
-    const state = (await h.store.get(42))!;
+    const state = (await h.store.get("main", 42))!;
 
     // Correct tap: verified, but the first-contact purpose gate holds the
     // conversation back — no topic yet, just the purpose prompt.
@@ -59,8 +59,7 @@ describe("user → operator pipeline (7.2)", () => {
     );
     expect(result.status).toBe("purpose_pending");
 
-    const user = await h.db.users.getByTelegramUserId(42);
-    expect(user?.verifiedAt).not.toBeNull();
+    expect(await h.db.users.getVerifiedAt("main", 42)).not.toBeNull();
     expect(await h.db.conversations.getByTelegramUserId(42)).toBeNull();
     expect(h.telegram.topics.size).toBe(0);
 
@@ -100,7 +99,7 @@ describe("user → operator pipeline (7.2)", () => {
     const h = makeHarness();
     const services = buildServices(h.ctx);
     await services.processor.process(1, userMessage(42, 100, profile(42), text("/start")));
-    const state = (await h.store.get(42))!;
+    const state = (await h.store.get("main", 42))!;
     await services.processor.process(
       2,
       verificationAnswer(42, state.questionMessageId!, state.answer, "cq", profile(42)),
@@ -124,7 +123,7 @@ describe("user → operator pipeline (7.2)", () => {
     const h = makeHarness();
     const services = buildServices(h.ctx);
     await services.processor.process(1, userMessage(42, 100, profile(42), text("/start")));
-    const state = (await h.store.get(42))!;
+    const state = (await h.store.get("main", 42))!;
     await services.processor.process(
       2,
       verificationAnswer(42, state.questionMessageId!, state.answer, "cq", profile(42)),
@@ -159,7 +158,7 @@ describe("user → operator pipeline (7.2)", () => {
     expect((await h.db.users.getByTelegramUserId(42))?.purpose).toBeNull();
 
     // …and a correct tap re-asks for a purpose instead of opening the topic.
-    const state = (await h.store.get(42))!;
+    const state = (await h.store.get("main", 42))!;
     const result = await services.processor.process(
       2,
       verificationAnswer(42, state.questionMessageId!, state.answer, "cq", profile(42)),
@@ -174,7 +173,7 @@ describe("user → operator pipeline (7.2)", () => {
     const h = makeHarness();
     const services = buildServices(h.ctx);
     await services.processor.process(1, userMessage(42, 100, profile(42), text("/start")));
-    const state = (await h.store.get(42))!;
+    const state = (await h.store.get("main", 42))!;
     const wrong = state.choices.find((c) => c !== state.answer)!;
 
     const result = await services.processor.process(
@@ -183,7 +182,7 @@ describe("user → operator pipeline (7.2)", () => {
     );
     expect(result.status).toBe("verification_issued");
 
-    const after = (await h.store.get(42))!;
+    const after = (await h.store.get("main", 42))!;
     expect(after.attemptsLeft).toBe(state.attemptsLeft - 1);
     const reAsk = h.telegram.callsOf("editMessageText").find((c) => c.target.messageId === state.questionMessageId);
     expect(reAsk).toBeDefined();
@@ -196,15 +195,15 @@ describe("user → operator pipeline (7.2)", () => {
     const h = makeHarness();
     const services = buildServices(h.ctx);
     await services.processor.process(1, userMessage(42, 100, profile(42), text("/start")));
-    const state = (await h.store.get(42))!;
+    const state = (await h.store.get("main", 42))!;
     // config.verification.attempts = 3 → tap wrong twice, then a third wrong exhausts.
     for (let i = 2; i <= 3; i++) {
-      const before = (await h.store.get(42))!;
+      const before = (await h.store.get("main", 42))!;
       const wrong = before.choices.find((c) => c !== before.answer)!;
       await services.processor.process(i, verificationAnswer(42, before.questionMessageId!, wrong, `cq-${i}`, profile(42)));
     }
     await services.processor.process(4, verificationAnswer(42, state.questionMessageId!, 0, "cq-final", profile(42)));
-    expect(await h.store.get(42)).toBeNull();
+    expect(await h.store.get("main", 42)).toBeNull();
     const expired = h.telegram.callsOf("sendMessage").find((c) => c.target.chatId === 42 && c.payload.text === TEXTS("en").verifyExpired);
     expect(expired).toBeDefined();
     expect(await h.db.conversations.getByTelegramUserId(42)).toBeNull();
@@ -214,11 +213,11 @@ describe("user → operator pipeline (7.2)", () => {
     const h = makeHarness();
     const services = buildServices(h.ctx);
     await services.processor.process(1, userMessage(42, 100, profile(42), text("/start")));
-    const state = (await h.store.get(42))!;
+    const state = (await h.store.get("main", 42))!;
 
     const result = await services.processor.process(2, userMessage(42, 101, profile(42), text("hello?")));
     expect(result.status).toBe("verification_issued");
-    const after = (await h.store.get(42))!;
+    const after = (await h.store.get("main", 42))!;
     expect(after.attemptsLeft).toBe(state.attemptsLeft);
     expect(await h.db.conversations.getByTelegramUserId(42)).toBeNull();
   });
@@ -488,7 +487,7 @@ describe("staff skip the verification gate (2026-09)", () => {
     expect(await h.db.users.getByTelegramUserId(222)).not.toBeNull();
     expect(await h.db.conversations.getByTelegramUserId(222)).not.toBeNull();
     // No challenge state and no challenge message was created for the operator.
-    expect(await h.store.get(222)).toBeNull();
+    expect(await h.store.get("main", 222)).toBeNull();
     const challenge = h.telegram.callsOf("sendMessage").find((c) => c.target.chatId === 222 && c.replyMarkup != null);
     expect(challenge).toBeUndefined();
   });
@@ -501,8 +500,8 @@ describe("staff skip the verification gate (2026-09)", () => {
     const result = await services.processor.process(1, userMessage(111, 100, profile(111), text("hi from the boss")));
     expect(result.status).toBe("processed");
 
-    expect((await h.db.users.getByTelegramUserId(111))?.verifiedAt).not.toBeNull();
-    expect(await h.store.get(111)).toBeNull();
+    expect(await h.db.users.getVerifiedAt("main", 111)).not.toBeNull();
+    expect(await h.store.get("main", 111)).toBeNull();
     // The message was forwarded into the admin's own topic, which got a
     // user-info text card at creation (no profile photo on the admin). The card
     // is an unpinned info display.

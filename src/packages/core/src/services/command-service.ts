@@ -14,6 +14,7 @@
 import { parseCommand, type ConversationDeleteEvent, type OperatorMessageEvent, type UserProfile } from "@relaytg/shared";
 import { OPERATOR_TEXTS } from "./texts.ts";
 import type { ServiceContext } from "./service-context.ts";
+import type { BotInfo } from "./bot-registry.ts";
 import { CommandBase, type CommandsDeps } from "./command-base.ts";
 import { AdCommands } from "./ad-commands.ts";
 import { DeleteCommands } from "./delete-commands.ts";
@@ -154,33 +155,35 @@ export class CommandService extends CommandBase {
     }
   }
 
-  /** /list — delegating to DeleteCommands (shared with the staff private chat). */
-  async listAll(sender: UserProfile, chatId: number): Promise<void> {
-    await this.deleteCommands.listAll(sender, chatId);
+  /** /list — delegating to DeleteCommands (shared with the staff private chat).
+   *  `bot` picks the replying client for private-chat call sites. */
+  async listAll(sender: UserProfile, chatId: number, bot?: BotInfo): Promise<void> {
+    await this.deleteCommands.listAll(sender, chatId, bot);
   }
 
   /** /delete at group level / private chat — delegating to DeleteCommands. */
-  async deleteFromList(sender: UserProfile, chatId: number, args: string[]): Promise<void> {
-    await this.deleteCommands.deleteFromList(sender, chatId, args);
+  async deleteFromList(sender: UserProfile, chatId: number, args: string[], bot?: BotInfo): Promise<void> {
+    await this.deleteCommands.deleteFromList(sender, chatId, args, bot);
   }
 
   /** Callback tap on a delete-picker button — delegating to DeleteCommands. */
-  async handleDeleteTap(event: ConversationDeleteEvent): Promise<void> {
-    await this.deleteCommands.handleDeleteTap(event);
+  async handleDeleteTap(event: ConversationDeleteEvent, bot?: BotInfo): Promise<void> {
+    await this.deleteCommands.handleDeleteTap(event, bot);
   }
 
   /** /lang — switch the sender's language, wherever the command was posted
    *  (a topic, the group's general chat, or the bot's private chat). Shared by
    *  the operator dispatcher here and the user private-chat route, which
    *  delegates through `this.deps.commands.lang`. The reply copy is identical
-   *  across the user and operator lexicons. */
-  async lang(sender: UserProfile, args: string[], target: { chatId: number; messageThreadId?: number }): Promise<void> {
+   *  across the user and operator lexicons. `bot` picks the replying client for
+   *  private-chat call sites; group replies default to PRIMARY. */
+  async lang(sender: UserProfile, args: string[], target: { chatId: number; messageThreadId?: number }, bot?: BotInfo): Promise<void> {
     // The sender may set /lang before ever messaging as a user — guarantee a
     // row so the preference persists on first contact (same as the user path).
     await this.deps.users.getOrCreate(sender);
     const current = await this.deps.users.effectiveLanguageOf(sender);
     const arg = args[0]?.toLowerCase();
-    const reply = (text: string): Promise<void> => this.sendTo(target.chatId, target.messageThreadId, text);
+    const reply = (text: string): Promise<void> => this.sendTo(target.chatId, target.messageThreadId, text, bot);
     if (arg == null) {
       await reply(OPERATOR_TEXTS(current).langCurrent(current));
       return;

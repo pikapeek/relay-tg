@@ -95,6 +95,8 @@ export interface LogFields {
   pinned?: boolean;
   /** What an ad detection matched (keyword/pattern), for ad_blocked lines. */
   reason?: string;
+  /** The bot a log line belongs to (multi-bot: events arrive per bot). */
+  botId?: string;
 }
 
 /** Restricted field keys — anything not in this set is dropped at runtime. */
@@ -116,6 +118,7 @@ const FIELD_KEYS = new Set<keyof LogFields>([
   "mode",
   "pinned",
   "reason",
+  "botId",
 ]);
 
 export interface Logger {

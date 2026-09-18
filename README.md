@@ -17,6 +17,7 @@ Each user gets their own topic in a forum group — operators reply inside the t
 | | |
 | --- | --- |
 | 🔁 **Two-way relay** | Text, media and albums both ways — replies and operator edits preserved. |
+| 👥 **N bots, one group** | Any number of bots share one support group — a separate topic per (bot × user), replies go out through the topic's own bot. |
 | ✅ **Verification + purpose gate** | `/start` arithmetic challenge or `/apply` approval; first-timers state their purpose first. |
 | 🌐 **Bilingual** | English + 简体中文, auto-detected, `/lang` to override. |
 | 👥 **Roles** | `ADMIN` / `OPERATOR`; all operators handle all conversations by default. |
@@ -33,7 +34,7 @@ Each user gets their own topic in a forum group — operators reply inside the t
 
 ### 1️⃣ Prepare once in Telegram
 
-1. **Bot token** — [@BotFather](https://t.me/BotFather): send `/newbot`, pick a name, copy the token.
+1. **Bot token(s)** — [@BotFather](https://t.me/BotFather): send `/newbot`, pick a name, copy the token. One bot is enough; for multi-bot, repeat with more names and add each as `name:token` to `BOTS`.
 2. **Forum group** — create a group, enable **Topics**, add the bot as **admin** with *Manage Topics*.
 3. **Group id** — right-click a message → *Copy Message Link* (`https://t.me/c/1234567890/5`) → the group id is `-1001234567890`.
 4. **Admin / operator ids** — numeric user ids (from @userinfobot) into `ADMIN_IDS` / `OPERATOR_IDS`.
@@ -43,10 +44,10 @@ Each user gets their own topic in a forum group — operators reply inside the t
 **💻 Command line** — one-command script: install, configure and start in a single line:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/pikapeek/relay-tg/main/scripts/run.sh) --token=1234567890:REPLACE_WITH_REAL_TOKEN --group=-1001234567890 --admin=111,222
+bash <(curl -fsSL https://raw.githubusercontent.com/pikapeek/relay-tg/main/scripts/run.sh) --bots=main:1234567890:REPLACE_WITH_REAL_TOKEN --group=-1001234567890 --admin=111,222
 ```
 
-Every option is optional — leave out `--token` / `--group` and the script asks for them interactively (BOT_TOKEN is not echoed). The script checks the environment first: if Node is missing or below 22.5, it asks for your consent and installs an official Node 22 into `~/.relaytg` (no system changes). Then it clones the source, writes `.env`, installs dependencies and starts on port 17575 — no manual editing. Re-run the same line without options to start again from the existing `.env`. Options: `--token` / `--group` / `--admin` / `--operator` / `--port` / `--db` / `--auto-hide`.
+Every option is optional — leave out `--bots` / `--group` and the script asks for them interactively (BOTS is not echoed). The script checks the environment first: if Node is missing or below 22.5, it asks for your consent and installs an official Node 22 into `~/.relaytg` (no system changes). Then it clones the source, writes `.env`, installs dependencies and starts on port 17575 — no manual editing. Re-run the same line without options to start again from the existing `.env`. Options: `--bots` / `--group` / `--admin` / `--operator` / `--port` / `--db` / `--auto-hide`.
 
 **🐳 Docker** — `docker-compose.yml`:
 
@@ -71,7 +72,7 @@ docker compose up -d
 ```bash
 docker run -d --name relaytg --restart unless-stopped \
   -p 17575:17575 -v "$PWD/data:/app/data" \
-  -e BOT_TOKEN=1234567890:TOKEN \
+  -e BOTS=main:1234567890:TOKEN \
   -e GROUP_ID=-1001234567890 \
   -e ADMIN_IDS=111,222 \
   ghcr.io/pikapeek/relay-tg:latest
@@ -84,18 +85,39 @@ docker run -d --name relaytg --restart unless-stopped \
 …or manual:
 
 ```bash
-pnpm deploy:cf   # pushes BOT_TOKEN / GROUP_ID / ADMIN_IDS / OPERATOR_IDS / WEBHOOK_SECRET from .env as secrets, then deploys
+pnpm deploy:cf   # pushes BOTS / GROUP_ID / ADMIN_IDS / OPERATOR_IDS / WEBHOOK_SECRET from .env as secrets, then deploys
 ```
 
 ### 3️⃣ Activate the webhook
 
+The **primary** bot (the first `name:token` in `BOTS`) registers at `/webhook`:
+
 ```text
-https://api.telegram.org/bot<BOT_TOKEN>/setWebhook?url=<PUBLIC_URL>/webhook&secret_token=<WEBHOOK_SECRET>
+https://api.telegram.org/bot<TOKEN>/setWebhook?url=<PUBLIC_URL>/webhook&secret_token=<WEBHOOK_SECRET>
 ```
 
-`PUBLIC_URL` = your Cloudflare domain or an HTTPS tunnel (e.g. cloudflared). If you set `WEBHOOK_SECRET`, RelayTG rejects updates without it.
+Every **additional** bot registers at `/webhook/<name>`, sharing the same `WEBHOOK_SECRET`:
+
+```text
+https://api.telegram.org/bot<TOKEN>/setWebhook?url=<PUBLIC_URL>/webhook/<name>&secret_token=<WEBHOOK_SECRET>
+```
+
+`PUBLIC_URL` = your Cloudflare domain or an HTTPS tunnel (e.g. cloudflared). The webhook path selects the bot; `WEBHOOK_SECRET` guards all of them. If you set `WEBHOOK_SECRET`, RelayTG rejects updates without it.
 
 Health check: `curl http://localhost:17575/health` → `{"status":"ok"}`
+
+### 🌐 Multi-bot (N bots, one support group)
+
+Point several bots at the same deployment: each `name:token` in `BOTS` becomes a separate entry point for users. All bots share the **same** support group; each (bot × user) pair gets its **own** topic, named `bot名 | 用户名 | ID`.
+
+```text
+BOTS=main:1111:TOKEN_A,sales:2222:TOKEN_B,support:3333:TOKEN_C
+```
+
+- The **first** bot is the *primary*: it owns the group control surface (commands, replies in the general chat, self-check). The other bots' copies of group events are ignored.
+- A reply inside a topic is delivered through **that topic's bot** — a user talking to `sales` gets replies from `sales`, never from `main`.
+- **Human verification is per (bot × user)**: a user who messages two bots must pass the arithmetic challenge **separately on each** — being verified on `main` never opens a topic on `sales`. The rest of the identity (ban, purpose, language, `/apply` approval) is **shared** across all bots.
+- Each bot needs its own `setWebhook` call — primary at `/webhook`, the rest at `/webhook/<name>` (see step 3).
 
 ---
 
@@ -103,7 +125,7 @@ Health check: `curl http://localhost:17575/health` → `{"status":"ok"}`
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `BOT_TOKEN` | — required | Bot token from @BotFather |
+| `BOTS` | — required | Comma-separated `name:token` pairs from @BotFather; the FIRST is the primary bot (owns the group control surface). Each name is everything before the first `:` of its entry, used as the topic-name prefix. A single bot is just `main:<token>`. |
 | `GROUP_ID` | — required | Support group id, e.g. `-1001234567890` |
 | `ADMIN_IDS` | — | Admin user ids, comma-separated |
 | `OPERATOR_IDS` | — | Operator user ids, comma-separated |
@@ -143,4 +165,4 @@ Users just message the bot: `/start` to get in, `/apply` to apply as an operator
 ## 🔐 Security
 
 > [!IMPORTANT]
-> `BOT_TOKEN` never enters git, logs, the database, the Docker image, or client code — it's read only from environment variables / Worker secrets. `.env*` and `data/` are gitignored. Access is by `telegram_user_id` only.
+> `BOTS` never enters git, logs, the database, the Docker image, or client code — it's read only from environment variables / Worker secrets. `.env*` and `data/` are gitignored. Access is by `telegram_user_id` only.

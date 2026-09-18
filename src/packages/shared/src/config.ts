@@ -48,8 +48,17 @@ export interface TelegramRetryConfig {
   baseBackoffMs: number;
 }
 
+/** One configured Telegram bot. `id` is the stable per-bot key (webhook path
+ *  segment, topic-name prefix, every per-bot table row). */
+export interface BotConfig {
+  id: string;
+  token: string;
+}
+
 export interface Config {
-  botToken: string;
+  /** Every configured bot, in BOTS order; the first is the PRIMARY bot that
+   *  owns the support-group control surface. Never empty. */
+  bots: BotConfig[];
   supportGroupId: number;
   adminIds: number[];
   operatorIds: number[];
@@ -158,19 +167,43 @@ function nonNegative(value: number, key: string): number {
   return value;
 }
 
+/** Parse `BOTS="<name>:<token>,<name>:<token>"`. Split on the FIRST colon of
+ *  each entry — Telegram tokens (`123456:ABC…`) contain a colon. Names become
+ *  the per-bot id (webhook path segment, topic prefix) and must be
+ *  URL-path-safe. `BOTS` is required and must yield at least one bot. */
+function botsFrom(env: EnvSource): BotConfig[] {
+  const raw = env.BOTS;
+  if (raw === undefined || raw === null || raw.trim() === "") {
+    throw new ValidationError("Missing required config: BOTS");
+  }
+  const bots: BotConfig[] = [];
+  for (const part of raw.split(",")) {
+    const entry = part.trim();
+    if (entry === "") continue;
+    const idx = entry.indexOf(":");
+    if (idx <= 0) throw new ValidationError(`Invalid bot entry in BOTS: "${entry}" (expected name:token)`);
+    const id = entry.slice(0, idx).trim();
+    const token = entry.slice(idx + 1).trim();
+    if (!/^[A-Za-z0-9_-]+$/.test(id)) {
+      throw new ValidationError(`Invalid bot name in BOTS: "${id}" (allowed: letters, digits, _ -)`);
+    }
+    if (token === "") throw new ValidationError(`Invalid bot token in BOTS entry "${id}"`);
+    bots.push({ id, token });
+  }
+  if (bots.length === 0) throw new ValidationError("Missing required config: BOTS");
+  return bots;
+}
+
 /** Parse the environment into a typed, validated Config. */
 export function loadConfig(env: EnvSource): Config {
-  const botToken = env.BOT_TOKEN;
-  if (!botToken || botToken.trim() === "") {
-    throw new ValidationError("Missing required config: BOT_TOKEN");
-  }
+  const bots = botsFrom(env);
 
   const supportGroupId = requiredInt(env, "GROUP_ID");
   if (supportGroupId === 0) throw new ValidationError("GROUP_ID must not be 0");
   const autoHideHours = nonNegative(intFrom(env, "AUTO_HIDE_HOURS", DEFAULTS.autoHideHours), "AUTO_HIDE_HOURS");
 
   return {
-    botToken: botToken.trim(),
+    bots,
     supportGroupId,
     adminIds: intList(env, "ADMIN_IDS"),
     operatorIds: intList(env, "OPERATOR_IDS"),

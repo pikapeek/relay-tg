@@ -58,18 +58,31 @@ export interface UserRepository {
   setPreferredLanguage(telegramUserId: number, language: string | null, now: Date): Promise<void>;
   /** Users with an explicit `/lang` override, for re-applying their menus at boot. */
   listPreferredLanguageUsers(): Promise<UserRecord[]>;
-  setVerifiedAt(telegramUserId: number, at: Date): Promise<void>;
+  /** ISO timestamp of the user's passed human verification on `botId`, or null.
+   *  Verification is per (bot, user): passing the gate on one bot never marks
+   *  the human verified on another. */
+  getVerifiedAt(botId: string, telegramUserId: number): Promise<string | null>;
+  /** Mark the user verified on `botId` (idempotent). */
+  setVerifiedAt(botId: string, telegramUserId: number, at: Date): Promise<void>;
+  /** Clear the user's verification on `botId` only — conversation delete
+   *  re-locks that bot's door while other bots' verification survives. */
+  clearVerified(botId: string, telegramUserId: number): Promise<void>;
   setApprovedAt(telegramUserId: number, at: Date): Promise<void>;
   /** Persist the purpose stated at first contact; clears the purpose gate. */
   setPurpose(telegramUserId: number, purpose: string, at: Date): Promise<void>;
-  /** Clear verified_at, approved_at, and the stored purpose — the "delete =
-   *  re-verify + re-state purpose" reset. */
+  /** Clear the GLOBAL access fields (approved_at, purpose, purpose_at) — the
+   *  "delete = re-verify + re-state purpose" reset. Per-bot verification is
+   *  cleared separately via clearVerified for the deleted conversation's bot. */
   resetAccess(telegramUserId: number): Promise<void>;
 }
 
 export interface ConversationRepository {
   getById(id: string): Promise<ConversationRecord | null>;
+  /** The user's MOST RECENT conversation across all bots (multi-bot
+   *  disambiguation fallback). Prefer the exact getByBotAndUser. */
   getByTelegramUserId(telegramUserId: number): Promise<ConversationRecord | null>;
+  /** The single conversation for a (bot × user) pair — the uniqueness key. */
+  getByBotAndUser(botId: string, telegramUserId: number): Promise<ConversationRecord | null>;
   getByTopicId(telegramTopicId: number): Promise<ConversationRecord | null>;
   create(input: ConversationCreateInput, now: Date): Promise<ConversationRecord>;
   updateTopicId(id: string, telegramTopicId: number): Promise<void>;
@@ -137,8 +150,9 @@ export interface ApplicationRepository {
 }
 
 export interface ProcessedUpdatesRepository {
-  /** Claim an update_id before processing; false when already claimed. */
-  claim(updateId: number, now: Date): Promise<boolean>;
+  /** Claim an update_id before processing; false when already claimed.
+   *  Update ids increment per bot, so the claim is scoped by bot_id. */
+  claim(botId: string, updateId: number, now: Date): Promise<boolean>;
 }
 
 export interface SettingsRepository {
@@ -185,9 +199,11 @@ export interface VerificationState {
 }
 
 export interface VerificationStore {
-  get(telegramUserId: number): Promise<VerificationState | null>;
-  set(telegramUserId: number, state: VerificationState): Promise<void>;
-  delete(telegramUserId: number): Promise<void>;
+  /** Challenges are per (bot, user): two bots' arithmetic gates must not
+   *  overwrite each other, so the store is keyed by botId + telegramUserId. */
+  get(botId: string, telegramUserId: number): Promise<VerificationState | null>;
+  set(botId: string, telegramUserId: number, state: VerificationState): Promise<void>;
+  delete(botId: string, telegramUserId: number): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------

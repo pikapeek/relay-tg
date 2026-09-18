@@ -155,10 +155,87 @@ ALTER TABLE users ADD COLUMN purpose TEXT;
 ALTER TABLE users ADD COLUMN purpose_at TEXT;
 `;
 
+const MULTI_BOT_SQL = `-- migration 004: multi-bot support.
+--
+-- Every bot is a distinct Telegram bot with its own token and webhook; the
+-- support group stays ONE shared forum. Conversations, message rows and the
+-- update-claim ledger become per-bot:
+--   conversations.id is unchanged (uuid); (bot_id, telegram_user_id) is now the
+--     uniqueness key — one topic per (bot × human).
+--   messages.telegram_chat_id is the same numeric user id across every bot's
+--     private chat (a private chat id equals the user id), while message ids
+--     restart at 1 per (bot, chat), so source uniqueness becomes (bot_id,
+--     chat_id, message_id). A plain (chat_id, message_id) index is kept for
+--     edit-time lookups — group message ids are globally unique, so those never
+--     collide across bots.
+--   processed_updates.update_id increments per bot; claims are keyed by
+--     (bot_id, update_id) — the table is rebuilt with a composite primary key.
+-- Existing single-bot rows are tagged with the identity 'primary'.
+--
+-- The first statement is an ALTER so the fake DO SQL handle routes the whole
+-- script through multi-statement exec (its dispatch looks at the first keyword).
+
+ALTER TABLE conversations ADD COLUMN bot_id TEXT NOT NULL DEFAULT 'primary';
+ALTER TABLE messages ADD COLUMN bot_id TEXT NOT NULL DEFAULT 'primary';
+
+DROP INDEX idx_conversations_telegram_user_id;
+CREATE UNIQUE INDEX idx_conversations_bot_user ON conversations(bot_id, telegram_user_id);
+
+DROP INDEX idx_messages_source;
+CREATE UNIQUE INDEX idx_messages_source_bot ON messages(bot_id, telegram_chat_id, telegram_message_id);
+CREATE INDEX idx_messages_source ON messages(telegram_chat_id, telegram_message_id);
+
+CREATE TABLE processed_updates_new (
+  bot_id       TEXT NOT NULL,
+  update_id    INTEGER NOT NULL,
+  claim_id     TEXT NOT NULL,
+  processed_at TEXT NOT NULL,
+  PRIMARY KEY (bot_id, update_id)
+);
+
+INSERT INTO processed_updates_new (bot_id, update_id, claim_id, processed_at)
+  SELECT 'primary', update_id, claim_id, processed_at FROM processed_updates;
+
+DROP TABLE processed_updates;
+ALTER TABLE processed_updates_new RENAME TO processed_updates;`;
+
+const PER_BOT_VERIFICATION_SQL = `-- migration 005: per-bot independent human verification.
+--
+-- Previously a single users.verified_at marked the human verified on EVERY
+-- bot: passing the arithmetic gate on bot1 auto-verified them on bot2. Now the
+-- gate is per (bot, human) — a user who contacts two bots must pass the
+-- challenge separately on each. The identity-level fields that stay global
+-- (approved_at, purpose, block, language, role) remain on \`users\`;
+-- verification moves to its own per-bot table. The legacy users.verified_at
+-- column is kept in the schema (harmless, never read) so single-bot data maps
+-- onto the primary bot's namespace without rewriting.
+--
+-- Existing single-bot verification rows are backfilled onto the primary bot's
+-- namespace ('primary'): a pre-005 user verified on their only bot keeps being
+-- verified on that bot, exactly as before.
+--
+-- The first statement is a CREATE so the fake DO SQL handle routes the whole
+-- script through multi-statement exec (its dispatch looks at the first keyword).
+
+CREATE TABLE user_verifications (
+  bot_id           TEXT NOT NULL,
+  telegram_user_id INTEGER NOT NULL,
+  verified_at      TEXT NOT NULL, -- ISO timestamp, per (bot, human)
+  PRIMARY KEY (bot_id, telegram_user_id)
+);
+
+CREATE INDEX idx_user_verifications_telegram_user_id ON user_verifications(telegram_user_id);
+
+INSERT INTO user_verifications (bot_id, telegram_user_id, verified_at)
+  SELECT 'primary', telegram_user_id, verified_at FROM users WHERE verified_at IS NOT NULL;
+`;
+
 /** Migration list, version-sorted (001 < 002 < ...). Kept in sync with the
  *  on-disk files by the drift test. */
 export const MIGRATIONS: Migration[] = [
   { version: "001_initial", sql: INITIAL_SQL },
   { version: "002_preferred_language", sql: PREFERRED_LANGUAGE_SQL },
   { version: "003_purpose", sql: PURPOSE_SQL },
+  { version: "004_multi_bot", sql: MULTI_BOT_SQL },
+  { version: "005_per_bot_verification", sql: PER_BOT_VERIFICATION_SQL },
 ];
